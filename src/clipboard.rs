@@ -5,6 +5,7 @@
 //! UI never stalls, and the thread exits as soon as it is done.
 
 use crate::app::{App, WM_APP_CLIPDONE};
+use crate::peek::Copied;
 use crate::store::{ClipItem, Kind, Sub, classify, hash64, make_preview, now_secs, write_atomic};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::*;
@@ -160,6 +161,7 @@ fn add_text(app: &App, text: String) {
         }
     }
     app.after_store_change();
+    app.show_copy_peek(Copied::Text(&text));
 }
 
 // ---------------------------------------------------------------- images
@@ -338,6 +340,7 @@ unsafe fn save_png(wic: &IWICImagingFactory, src: &IWICBitmapSource, path: &Path
 /// `WM_APP_CLIPDONE`: the worker finished; take ownership of the result.
 pub fn on_image_done(app: &App, lp: LPARAM) {
     let done = unsafe { Box::from_raw(lp.0 as *mut ImageDone) };
+    let shown_id;
     {
         let mut store = app.store.borrow_mut();
         let cleanup = |s: &crate::store::Store| {
@@ -351,7 +354,9 @@ pub fn on_image_done(app: &App, lp: LPARAM) {
         if let Some(existing) = store.find_hash(Kind::Image, done.hash) {
             store.touch(existing);
             cleanup(&store);
+            shown_id = existing;
         } else {
+            shown_id = done.id;
             store.add_or_touch(ClipItem {
                 id: done.id,
                 kind: Kind::Image,
@@ -368,6 +373,7 @@ pub fn on_image_done(app: &App, lp: LPARAM) {
         }
     }
     app.after_store_change();
+    app.show_copy_peek(Copied::Image { id: shown_id, w: done.w, h: done.h });
 }
 
 // ---------------------------------------------------------------- paste-back

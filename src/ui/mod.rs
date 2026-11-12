@@ -23,6 +23,11 @@ pub const EXPANDED_W: f32 = 440.0;
 pub const EXPANDED_H: f32 = 456.0;
 pub const RADIUS_OPEN: f32 = 26.0;
 
+/// The copy-peek capsule (see `peek.rs`): its height and the range of widths it can take.
+pub const PEEK_H: f32 = 46.0;
+pub const PEEK_MIN_W: f32 = COLLAPSED_W + 24.0;
+pub const PEEK_MAX_W: f32 = 340.0;
+
 /// Footer separator line and the vertical centre of footer content (offsets from pill top).
 pub const FOOTER_SEP: f32 = 414.0;
 pub const FOOTER_CY: f32 = 434.0;
@@ -210,6 +215,14 @@ pub struct View<'a> {
     pub note_active: usize,
     pub note_tabs: &'a NoteTabs,
     pub renaming: Option<usize>,
+    /// The copy peek, while the collapsed pill is showing one.
+    pub peek: Option<PeekView<'a>>,
     /// Unix seconds, for "2 min ago" labels.
     pub now: u64,
+}
+
+/// What the renderer needs to draw the copy-peek capsule this frame.
+pub struct PeekView<'a> {
+    pub content: &'a crate::peek::Content,
+    pub look: crate::peek::Look,
 }

@@ -24,6 +24,24 @@ almost nothing while idle.
 If a hotkey is already owned by another app, Notch falls back to `Ctrl+Alt+N` / `Ctrl+Alt+V` /
 `Ctrl+Alt+H`. The tray tooltip always shows which hotkeys are active.
 
+### Copy peek
+
+Each time you copy, the collapsed pill widens into a capsule that says **Copied** and shows what
+it was, then shrinks back: the check badge leads, the text fades in as the spring settles, it holds
+for about 2 s, then the text fades out before the width springs back.
+
+* Short text shows in full; long text is cut with an ellipsis (it never wraps). An image shows a
+  small thumbnail and its size (`Image · 1280 × 720`).
+* Copying again while it is up swaps the content and holds again, without replaying the widen.
+  It stays up while the cursor is on it. Click it to open the pill.
+* No peek when it would only be noise: the panel is already open, the pill is hidden or a
+  full-screen app is in front, capture is paused, or the copy is one Notch ignores (password
+  managers, its own pastes).
+* With Windows animation effects off (Settings > Accessibility > Visual effects) the capsule
+  cross-fades instead of widening.
+* Privacy: `"copy_peek_preview": false` shows only "Copied", never the content. `"copy_peek": false`
+  turns the peek off altogether.
+
 The logo is a pill split in two: amber for the notepad, cyan for the clipboard. The tray icon uses
 the bright colours on a dark taskbar and deeper tones on a light one, and switches by itself when
 you change Windows' light/dark mode.
@@ -86,6 +104,9 @@ Optional file: `%APPDATA%\Notch\settings.json` (all keys optional; restart to ap
   "max_items": 200,
   "max_image_mb": 200,
   "paste_on_click": true,
+  "copy_peek": true,
+  "copy_peek_preview": true,
+  "copy_peek_ms": 2000,
   "use_gpu": false
 }
 ```
@@ -101,7 +122,8 @@ If `notes.json` is ever unreadable it is kept as `notes.json.bad` rather than ov
 ## Why it is light
 
 * **Event-driven.** The UI thread blocks in `GetMessageW`; there are no polling timers. The 60 fps
-  frame loop exists only while the pill is animating, then the thread goes back to sleep.
+  frame loop exists only while the pill is animating, then the thread goes back to sleep. The copy
+  peek rides on the clipboard event and one one-shot timer, so it costs nothing between copies.
 * **Clipboard capture uses `WM_CLIPBOARDUPDATE`**, not polling. Image encoding (DIB → PNG +
   thumbnail through WIC) runs on a short-lived worker thread.
 * **Small resident set.** The index only holds short text previews; full text and images stay on
@@ -125,4 +147,5 @@ cargo build --release      # target\release\notch.exe
 ```
 
 Set the environment variable `NOTCH_LOG=1` before launching to write a debug log to
-`%TEMP%\notch.log`.
+`%TEMP%\notch.log`. `NOTCH_REDUCED_MOTION=1` forces the copy peek's cross-fade (for testing it
+without changing the Windows setting).

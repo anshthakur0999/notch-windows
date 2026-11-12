@@ -27,6 +27,12 @@ pub struct Settings {
     pub max_image_mb: u64,
     /// Clicking a clipboard entry also sends Ctrl+V to the previous window.
     pub paste_on_click: bool,
+    /// On each copy the collapsed pill briefly widens to say "Copied".
+    pub copy_peek: bool,
+    /// Show what was copied in that capsule. Off shows only "Copied" (nothing about the content).
+    pub copy_peek_preview: bool,
+    /// How long the capsule stays up (longer while the cursor is on it).
+    pub copy_peek_ms: u32,
     /// Draw on the GPU. Off (default) uses Microsoft's WARP software rasteriser, which avoids
     /// loading the vendor graphics driver (often 50+ MB of RAM) for what is a tiny drawing job.
     pub use_gpu: bool,
@@ -43,6 +49,9 @@ impl Default for Settings {
             max_items: 200,
             max_image_mb: 200,
             paste_on_click: true,
+            copy_peek: true,
+            copy_peek_preview: true,
+            copy_peek_ms: 2000,
             use_gpu: false,
         }
     }
@@ -58,6 +67,7 @@ impl Settings {
         s.collapse_delay_ms = s.collapse_delay_ms.clamp(50, 5000);
         s.max_items = s.max_items.clamp(10, 5000);
         s.max_image_mb = s.max_image_mb.clamp(10, 10_000);
+        s.copy_peek_ms = s.copy_peek_ms.clamp(500, 10_000);
         s
     }
 }
@@ -125,6 +135,8 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.max_items, 200);
         assert!(s.paste_on_click);
+        assert!(s.copy_peek && s.copy_peek_preview);
+        assert_eq!(s.copy_peek_ms, 2000);
         assert_eq!(parse_hotkey(&s.hotkey_toggle), Some((MOD_WIN | MOD_ALT, b'N' as u32)));
         assert_eq!(parse_hotkey(&s.hotkey_clipboard), Some((MOD_WIN | MOD_ALT, b'V' as u32)));
         assert_eq!(parse_hotkey(&s.hotkey_visibility), Some((MOD_WIN | MOD_ALT, b'H' as u32)));
@@ -152,11 +164,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("notch-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("settings.json");
-        std::fs::write(&p, r#"{ "max_items": 1, "hover_dwell_ms": 250 }"#).unwrap();
+        std::fs::write(&p, r#"{ "max_items": 1, "hover_dwell_ms": 250, "copy_peek_ms": 5 }"#).unwrap();
         let s = Settings::load(&p);
         assert_eq!(s.max_items, 10); // clamped up
         assert_eq!(s.hover_dwell_ms, 250);
         assert_eq!(s.collapse_delay_ms, 100); // default
+        assert_eq!(s.copy_peek_ms, 500); // clamped up
+        assert!(s.copy_peek); // default
         let _ = std::fs::remove_dir_all(&dir);
     }
 

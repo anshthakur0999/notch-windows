@@ -135,6 +135,24 @@ pub fn is_theme_change(lp: LPARAM) -> bool {
     unsafe { PCWSTR(lp.0 as *const u16).to_string().map(|s| s == "ImmersiveColorSet").unwrap_or(false) }
 }
 
+/// Windows animation effects are switched off (Settings > Accessibility > Visual effects), so
+/// motion should be replaced by fades. `NOTCH_REDUCED_MOTION=1` forces it on (for testing).
+pub fn reduced_motion() -> bool {
+    if std::env::var_os("NOTCH_REDUCED_MOTION").is_some() {
+        return true;
+    }
+    let mut on = BOOL(1);
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut on as *mut BOOL as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    ok.is_ok() && !on.as_bool()
+}
+
 pub fn remove_tray(hwnd: HWND) {
     unsafe {
         let nid = NOTIFYICONDATAW {

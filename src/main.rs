@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod clipboard;
 mod notes;
+mod peek;
 mod render;
 mod settings;
 mod shell;

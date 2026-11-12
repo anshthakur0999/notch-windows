@@ -8,7 +8,8 @@
 use crate::anim::{self, Spring};
 use crate::clipboard::{self, Formats};
 use crate::notes::Notes;
-use crate::render::{self, Renderer};
+use crate::peek::{self, Advance, Copied, Peek};
+use crate::render::{self, F, Renderer};
 use crate::settings::Settings;
 use crate::cli::{CMD_HIDE, CMD_QUIT, CMD_SHOW, CMD_TOGGLE};
 use crate::shell::{self, HK_CLIPBOARD, HK_TOGGLE, HK_VISIBILITY};
@@ -16,7 +17,7 @@ use crate::store::{Kind, Store, now_secs};
 use crate::ui::clip_list::{self, ListLayout};
 use crate::ui::notes_view::{self, NoteTabs};
 use crate::ui::{
-    self, COLLAPSED_H, COLLAPSED_W, EXPANDED_H, EXPANDED_W, Hit, HitCtx, Tab, View, WIN_H, WIN_W,
+    self, COLLAPSED_H, COLLAPSED_W, EXPANDED_H, EXPANDED_W, Hit, HitCtx, PEEK_H, PeekView, Tab, View, WIN_H, WIN_W,
 };
 use crate::window;
 use std::cell::{Cell, RefCell};
@@ -46,6 +47,8 @@ const T_COLLAPSE: usize = 2;
 const T_SAVE: usize = 3;
 const T_FS: usize = 4;
 const T_PASTE: usize = 5;
+/// The copy-peek capsule has been up long enough: start taking it down.
+const T_PEEK: usize = 6;
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -129,6 +132,8 @@ pub struct App {
     last_close: Cell<Option<Instant>>,
     /// Index of the note tab being renamed inline.
     renaming: Cell<Option<usize>>,
+    /// The "Copied" capsule shown by the collapsed pill after a copy (see `peek.rs`).
+    peek: RefCell<Option<Peek>>,
 
     renderer: RefCell<Option<Renderer>>,
     pub store: RefCell<Store>,
@@ -188,6 +193,7 @@ impl App {
             reveal_tab: Cell::new(true),
             last_close: Cell::new(None),
             renaming: Cell::new(None),
+            peek: RefCell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
             notes: Notes::new(dir),
@@ -364,13 +370,18 @@ impl App {
         let dt = now.duration_since(self.last_frame.get()).as_secs_f32();
         self.last_frame.set(now);
 
+        self.peek_advance(now);
+
         let mut w = self.w.get();
         let mut h = self.h.get();
-        // opening has the springy overshoot; closing is stiffer and snaps shut
-        let (freq, zeta) = if self.open.get() { (anim::FREQ, anim::ZETA) } else { (anim::CLOSE_FREQ, anim::CLOSE_ZETA) };
+        // opening (and the copy peek widening) has the springy overshoot; closing is stiffer and
+        // snaps shut
+        let growing = self.open.get() || self.peek.borrow().as_ref().is_some_and(Peek::growing);
+        let (freq, zeta) = if growing { (anim::FREQ, anim::ZETA) } else { (anim::CLOSE_FREQ, anim::CLOSE_ZETA) };
         w.step_with(dt, freq, zeta);
         h.step_with(dt, freq, zeta);
-        let done = w.settled() && h.settled();
+        // a fade the springs do not drive (the peek's text going out) also keeps the loop alive
+        let done = w.settled() && h.settled() && !self.peek.borrow().as_ref().is_some_and(|p| p.busy(now));
         if done {
             w.snap();
             h.snap();
@@ -413,10 +424,122 @@ impl App {
             if self.auto_close_ok() && !self.cursor_in_pill() {
                 self.arm_collapse();
             }
-        } else if let Some(r) = self.renderer.borrow_mut().as_mut() {
-            // fully closed: give back GPU thumbnails and the WIC factory
-            r.release_transient();
+        } else {
+            {
+                let mut peek = self.peek.borrow_mut();
+                match peek.as_ref() {
+                    // the capsule has finished widening and is being held: keep its thumbnail
+                    Some(p) if p.growing() => return,
+                    // it has shrunk back to the resting pill
+                    Some(_) => *peek = None,
+                    None => {}
+                }
+            }
+            if let Some(r) = self.renderer.borrow_mut().as_mut() {
+                // fully closed: give back GPU thumbnails and the WIC factory
+                r.release_transient();
+            }
         }
+    }
+
+    // ------------------------------------------------------------ copy peek
+
+    /// A copy just happened (text, or an image once it has been encoded): while the pill is
+    /// collapsed, widen it into a capsule that says "Copied" and shows what it was.
+    ///
+    /// No peek when it would only be noise: the panel is open (the new entry is right there),
+    /// the pill is hidden (a full-screen app is in front, or the user hid it), or the pill is
+    /// still closing from a big size. Copies that are not recorded (password managers, paused,
+    /// our own pastes) never get here.
+    pub fn show_copy_peek(&self, copied: Copied) {
+        let s = &self.settings;
+        if !s.copy_peek || self.open.get() || self.is_hidden() || self.h.get().pos > PEEK_H + 8.0 {
+            crate::log(&format!(
+                "copy peek skipped: enabled={} open={} hidden={} h={:.0}",
+                s.copy_peek,
+                self.open.get(),
+                self.is_hidden(),
+                self.h.get().pos
+            ));
+            return;
+        }
+        let content = {
+            let r = self.renderer.borrow();
+            let Some(r) = r.as_ref() else { return };
+            let label_w = r.text_w(F::Seg, "Copied");
+            peek::compose(copied, s.copy_peek_preview, label_w, |line| r.measure(F::Tab, line))
+        };
+        let target_w = content.target_w;
+        let now = Instant::now();
+        let reduced = shell::reduced_motion();
+        crate::log(&format!("copy peek: {:?} width={target_w:.0} reduced={reduced}", content.line));
+        {
+            let mut slot = self.peek.borrow_mut();
+            match slot.as_mut() {
+                // another copy while the capsule is up: swap the content, hold again, no replay
+                Some(p) => p.swap(content),
+                None => *slot = Some(Peek::new(content, reduced, now)),
+            }
+        }
+        self.set_targets(target_w, PEEK_H);
+        if reduced {
+            // no widening: the capsule is simply there and fades in
+            let (mut w, mut h) = (self.w.get(), self.h.get());
+            w.snap();
+            h.snap();
+            self.w.set(w);
+            self.h.set(h);
+            window::set_region(self.hwnd, self.dpi.get(), w.pos, h.pos);
+        }
+        unsafe {
+            // restarting the one-shot timer holds the capsule for another full period
+            SetTimer(Some(self.hwnd), T_PEEK, s.copy_peek_ms, None);
+        }
+        self.invalidate();
+    }
+
+    /// The hold is over: take the capsule down, unless the cursor is on it.
+    fn peek_hold_over(&self) {
+        if self.peek.borrow().is_none() {
+            return;
+        }
+        if self.cursor_in_pill() {
+            unsafe {
+                SetTimer(Some(self.hwnd), T_PEEK, 250, None); // look again shortly
+            }
+            return;
+        }
+        if let Some(p) = self.peek.borrow_mut().as_mut() {
+            p.begin_leave(Instant::now());
+        }
+        self.start_anim(); // the text fade needs the frame loop
+    }
+
+    /// Per frame: move the peek on from the text fade to the shrink.
+    fn peek_advance(&self, now: Instant) {
+        let step = self.peek.borrow_mut().as_mut().map(|p| p.advance(now));
+        match step {
+            Some(Advance::Shrink) => self.set_targets(COLLAPSED_W, COLLAPSED_H),
+            Some(Advance::Finished) => {
+                // reduced motion: the capsule has faded out; go straight back to the resting size
+                *self.peek.borrow_mut() = None;
+                self.set_targets(COLLAPSED_W, COLLAPSED_H);
+                let (mut w, mut h) = (self.w.get(), self.h.get());
+                w.snap();
+                h.snap();
+                self.w.set(w);
+                self.h.set(h);
+            }
+            _ => {}
+        }
+    }
+
+    /// Drops the peek at once (the pill is opening or being hidden).
+    fn peek_clear(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), T_PEEK);
+        }
+        *self.peek.borrow_mut() = None;
     }
 
     // --------------------------------------------------------------- render
@@ -443,8 +566,10 @@ impl App {
             let list = self.list.borrow();
             let tabs = self.tabs.borrow();
             let query = self.query.borrow();
+            let peek = self.peek.borrow();
             let (Some(list), Some(tabs)) = (list.as_ref(), tabs.as_ref()) else { return };
             let (w, h) = self.size();
+            let peek_view = peek.as_ref().map(|p| PeekView { content: &p.content, look: p.look(w, Instant::now()) });
             let view = View {
                 w,
                 h,
@@ -464,6 +589,7 @@ impl App {
                 note_active: self.notes.active(),
                 note_tabs: tabs,
                 renaming: self.renaming.get(),
+                peek: peek_view,
                 now: now_secs(),
             };
             match ui::pill::draw(r, &view) {
@@ -511,6 +637,7 @@ impl App {
                 self.prev_fg.set(fg);
             }
         }
+        self.peek_clear(); // the springs carry on from wherever the capsule was
         self.open.set(true);
         self.relayout_tabs(true); // show the active note's tab even if the row is scrolled elsewhere
         self.set_targets(EXPANDED_W, EXPANDED_H);
@@ -1335,6 +1462,7 @@ impl App {
                 }
             }
             T_SAVE => self.notes.flush(),
+            T_PEEK => self.peek_hold_over(),
             T_FS => self.update_fullscreen(),
             T_PASTE => {
                 crate::log(&format!("send Ctrl+V; foreground={:?}", unsafe { GetForegroundWindow() }));
@@ -1361,6 +1489,7 @@ impl App {
     fn apply_visibility(&self) {
         let visible = unsafe { IsWindowVisible(self.hwnd).as_bool() };
         if self.is_hidden() && visible {
+            self.peek_clear();
             self.collapse();
             // jump straight to the collapsed size so nothing animates while hidden
             let mut w = self.w.get();

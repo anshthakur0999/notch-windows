@@ -343,8 +343,16 @@ impl Renderer {
         if let Some(w) = self.widths.borrow().get(&key) {
             return *w;
         }
+        let w = self.measure(f, s);
+        self.widths.borrow_mut().insert(key, w);
+        w
+    }
+
+    /// Width in DIPs of `s` in style `f`, not cached (for text that is different every time,
+    /// such as a copied clip).
+    pub fn measure(&self, f: F, s: &str) -> f32 {
         let wide: Vec<u16> = s.encode_utf16().collect();
-        let w = unsafe {
+        unsafe {
             self.dw
                 .CreateTextLayout(&wide, self.fmt(f), 4000.0, 100.0)
                 .ok()
@@ -353,9 +361,7 @@ impl Renderer {
                     l.GetMetrics(&mut m).ok().map(|_| m.widthIncludingTrailingWhitespace)
                 })
                 .unwrap_or(s.chars().count() as f32 * 7.0)
-        };
-        self.widths.borrow_mut().insert(key, w);
-        w
+        }
     }
 
     /// One icon-font glyph centred on (cx, cy). `f` must be one of the `Icon*` styles.
@@ -415,6 +421,35 @@ impl Renderer {
     pub fn draw_bitmap(&self, bmp: &ID2D1Bitmap1, dest: D2D_RECT_F, opacity: f32) {
         unsafe {
             self.dc.DrawBitmap(bmp, Some(&dest), opacity, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+        }
+    }
+
+    /// Fills a rounded rectangle with `bmp`, scaled to cover it (centred, the overflow cropped),
+    /// so the picture itself has the rounded corners.
+    pub fn fill_rrect_cover(&self, bmp: &ID2D1Bitmap1, dest: D2D_RECT_F, radius: f32, opacity: f32) {
+        unsafe {
+            let size = bmp.GetSize();
+            if size.width <= 0.0 || size.height <= 0.0 {
+                return;
+            }
+            let (dw, dh) = (dest.right - dest.left, dest.bottom - dest.top);
+            let s = (dw / size.width).max(dh / size.height);
+            let props = D2D1_BRUSH_PROPERTIES {
+                opacity,
+                transform: Matrix3x2 {
+                    M11: s,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: s,
+                    M31: dest.left + (dw - size.width * s) / 2.0,
+                    M32: dest.top + (dh - size.height * s) / 2.0,
+                },
+            };
+            let Ok(brush) = self.dc.CreateBitmapBrush(bmp, None, Some(&props)) else { return };
+            self.dc.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT { rect: dest, radiusX: radius, radiusY: radius },
+                &brush,
+            );
         }
     }
 
