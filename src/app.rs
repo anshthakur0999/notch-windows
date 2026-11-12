@@ -22,7 +22,7 @@ use crate::window;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener};
@@ -121,6 +121,12 @@ pub struct App {
     /// Cached filtered list / note-tab layout; `None` = rebuild on next use.
     list: RefCell<Option<ListLayout>>,
     tabs: RefCell<Option<NoteTabs>>,
+    /// How far the note-tab row is scrolled (DIPs), and whether the next layout should scroll
+    /// the active (or renamed) tab into view first.
+    tab_scroll: Cell<f32>,
+    reveal_tab: Cell<bool>,
+    /// When a tab was last closed by click (see `close_tab`).
+    last_close: Cell<Option<Instant>>,
     /// Index of the note tab being renamed inline.
     renaming: Cell<Option<usize>>,
 
@@ -178,6 +184,9 @@ impl App {
             high_surrogate: Cell::new(0),
             list: RefCell::new(None),
             tabs: RefCell::new(None),
+            tab_scroll: Cell::new(0.0),
+            reveal_tab: Cell::new(true),
+            last_close: Cell::new(None),
             renaming: Cell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
@@ -284,9 +293,50 @@ impl App {
     fn ensure_tabs(&self) {
         if self.tabs.borrow().is_none() {
             if let Some(r) = self.renderer.borrow().as_ref() {
-                *self.tabs.borrow_mut() = Some(notes_view::layout(r, &self.notes.names()));
+                *self.tabs.borrow_mut() = Some(self.layout_tabs(r));
             }
         }
+    }
+
+    /// Lays out the note tabs at the current scroll; if a reveal is pending, first scrolls the
+    /// renamed (else the active) tab into view.
+    fn layout_tabs(&self, r: &Renderer) -> NoteTabs {
+        let names = self.notes.names();
+        let renaming = self.renaming.get();
+        let mut t = notes_view::layout(r, &names, renaming, self.tab_scroll.get());
+        if self.reveal_tab.replace(false) {
+            let s = notes_view::scroll_to_reveal(&t, renaming.unwrap_or(self.notes.active()));
+            if (s - t.scroll).abs() > 0.01 {
+                t = notes_view::layout(r, &names, renaming, s);
+            }
+        }
+        self.tab_scroll.set(t.scroll);
+        t
+    }
+
+    /// The tab row changed (note added/removed/renamed...): lay it out again, and bring the
+    /// active tab into view when `reveal` is set.
+    fn relayout_tabs(&self, reveal: bool) {
+        if reveal {
+            self.reveal_tab.set(true);
+        }
+        *self.tabs.borrow_mut() = None;
+    }
+
+    /// Scrolls the note-tab row by `dx` DIPs (mouse wheel over the notepad header).
+    fn scroll_tabs(&self, dx: f32) {
+        self.ensure_tabs();
+        let max = self.tabs.borrow().as_ref().map(|t| t.max_scroll).unwrap_or(0.0);
+        let now = self.tab_scroll.get();
+        let next = (now + dx).clamp(0.0, max);
+        if (next - now).abs() < 0.01 {
+            return;
+        }
+        self.tab_scroll.set(next);
+        self.relayout_tabs(false);
+        let (x, y) = self.mouse.get();
+        self.hover.set(self.hit_at(x, y)); // a different tab may now be under the pointer
+        self.invalidate();
     }
 
     // ------------------------------------------------------------ animation
@@ -387,7 +437,7 @@ impl App {
             self.ensure_list();
             let names = self.notes.names();
             if self.tabs.borrow().is_none() {
-                *self.tabs.borrow_mut() = Some(notes_view::layout(r, &names));
+                *self.tabs.borrow_mut() = Some(self.layout_tabs(r));
             }
             let store = self.store.borrow();
             let list = self.list.borrow();
@@ -462,6 +512,7 @@ impl App {
             }
         }
         self.open.set(true);
+        self.relayout_tabs(true); // show the active note's tab even if the row is scrolled elsewhere
         self.set_targets(EXPANDED_W, EXPANDED_H);
     }
 
@@ -773,6 +824,7 @@ impl App {
                 self.invalidate();
             }
             Hit::NoteTab(i) => self.select_note(i),
+            Hit::NoteClose(i) => self.close_tab(i),
             Hit::NoteAdd => self.add_note(),
             Hit::Row(k) => self.activate_row(k, shift),
             Hit::RowPin(k) => self.toggle_pin_row(k),
@@ -784,12 +836,45 @@ impl App {
     fn on_double_click(&self, px: i32, py: i32, shift: bool) {
         if self.expanded() {
             let (x, y) = (self.to_dip(px), self.to_dip(py));
-            if let Hit::NoteTab(i) = self.hit_at(x, y) {
-                self.begin_rename(i);
-                return;
+            match self.hit_at(x, y) {
+                Hit::NoteTab(i) => {
+                    self.begin_rename(i);
+                    return;
+                }
+                // the second click of a quick double-click on an "x" must not delete another note
+                Hit::NoteClose(_) => return,
+                _ => {}
             }
         }
         self.on_click(px, py, shift);
+    }
+
+    /// Middle-click on a note tab closes it (like browser tabs).
+    fn on_middle_click(&self, px: i32, py: i32) {
+        if !self.expanded() || self.tab.get() != Tab::Notes {
+            return;
+        }
+        let (x, y) = (self.to_dip(px), self.to_dip(py));
+        if let Hit::NoteTab(i) | Hit::NoteClose(i) = self.hit_at(x, y) {
+            self.close_tab(i);
+        }
+    }
+
+    /// Deletes note `i` from a click. Right after one such delete, further clicks are ignored for
+    /// a moment: the next tab slides under the pointer, and a double-click must not take it too.
+    fn close_tab(&self, i: usize) {
+        let recent = self.last_close.get().is_some_and(|t| t.elapsed() < Duration::from_millis(450));
+        if recent {
+            return;
+        }
+        self.delete_note(i);
+        self.last_close.set(Some(Instant::now()));
+    }
+
+    /// Ctrl+W in the notepad: delete the note being edited (asks first if it has text).
+    pub fn close_note(&self) {
+        self.finish_rename(false);
+        self.delete_note(self.notes.active());
     }
 
     fn on_right_click(&self, px: i32, py: i32) {
@@ -802,7 +887,20 @@ impl App {
         }
     }
 
-    fn on_wheel(&self, delta: i16) {
+    /// Horizontal wheel / touchpad swipe (`WM_MOUSEHWHEEL`): moves the note tabs (right = further right).
+    pub fn on_hwheel(&self, delta: i16) {
+        if self.expanded() && self.tab.get() == Tab::Notes {
+            self.scroll_tabs(delta as f32 / 120.0 * 72.0);
+        }
+    }
+
+    pub fn on_wheel(&self, delta: i16) {
+        if self.expanded() && self.tab.get() == Tab::Notes {
+            // the notepad's own text scrolls itself; over the pill's chrome the wheel moves the
+            // note tabs (wheel down = further right)
+            self.scroll_tabs(-(delta as f32) / 120.0 * 72.0);
+            return;
+        }
         if !self.expanded() || self.tab.get() != Tab::Clipboard {
             return;
         }
@@ -823,7 +921,7 @@ impl App {
     /// at once instead of waiting for the next mouse move. While the keyboard is driving, rows
     /// are not hovered (the selection shows instead); with the pointer outside the pill, nothing is.
     fn refresh_hover(&self) {
-        if !self.expanded() || self.tab.get() != Tab::Clipboard {
+        if !self.expanded() {
             return;
         }
         if !self.tracking.get() {
@@ -832,6 +930,13 @@ impl App {
         }
         let (x, y) = self.mouse.get();
         let hit = self.hit_at(x, y);
+        if self.tab.get() == Tab::Notes {
+            self.hover.set(hit); // the note tabs moved under the pointer
+            return;
+        }
+        if self.tab.get() != Tab::Clipboard {
+            return;
+        }
         if let Hit::Row(k) | Hit::RowPin(k) | Hit::RowDel(k) = hit {
             if self.kb_mode.get() {
                 self.hover.set(Hit::None);
@@ -1072,6 +1177,7 @@ impl App {
         }
         self.finish_rename(true);
         self.notes.select(i);
+        self.relayout_tabs(true); // e.g. Ctrl+Tab onto a tab that is scrolled out of sight
         if self.sticky.get() {
             self.notes.focus();
         }
@@ -1081,7 +1187,7 @@ impl App {
     pub fn add_note(&self) {
         self.finish_rename(true);
         if self.notes.add() {
-            *self.tabs.borrow_mut() = None;
+            self.relayout_tabs(true); // the new tab is last: scroll to it
             if self.expanded() && self.tab.get() == Tab::Notes {
                 self.show_notes();
                 self.sticky.set(true);
@@ -1105,26 +1211,38 @@ impl App {
             return;
         }
         self.finish_rename(true);
+        // lay the row out again with this tab widened: later tabs and the "+" shift to its right
+        self.renaming.set(Some(i));
+        self.relayout_tabs(true); // reveals the tab being renamed
         self.ensure_tabs();
         let rect = self.tabs.borrow().as_ref().and_then(|t| t.tabs.get(i).copied());
-        let Some(rect) = rect else { return };
+        let Some(rect) = rect else {
+            self.renaming.set(None);
+            *self.tabs.borrow_mut() = None;
+            return;
+        };
         self.sticky.set(true);
         self.activate_pill();
         let dpi = self.dpi.get();
         let (ox, oy) = self.origin.get();
-        let w = rect.w().max(96.0);
+        // The editor is only the text strip: it starts where the tab's label starts and is one
+        // line tall, centred on the label's baseline row. The rounded box around it is drawn by
+        // `notes_view` from `rename_box`, so the two always line up.
+        let boxr = notes_view::rename_box(&rect);
+        let (tx, ty, tw, th) = notes_view::rename_text(&boxr, &rect);
         let started = self.notes.begin_rename(
             self.hwnd,
-            ox + window::px(rect.l, dpi),
-            oy + window::px(rect.t + 2.0, dpi),
-            window::px(w, dpi),
-            window::px(30.0, dpi),
+            ox + window::px(tx, dpi),
+            oy + window::px(ty, dpi),
+            window::px(tw, dpi),
+            window::px(th, dpi),
             &self.notes.name(i),
         );
-        if started {
-            self.renaming.set(Some(i));
-            self.invalidate();
+        if !started {
+            self.renaming.set(None);
+            *self.tabs.borrow_mut() = None;
         }
+        self.invalidate();
     }
 
     /// Ends an inline rename (Enter/blur commits, Esc cancels).
@@ -1172,7 +1290,8 @@ impl App {
             }
         }
         self.notes.delete(i);
-        *self.tabs.borrow_mut() = None;
+        self.relayout_tabs(true);
+        self.refresh_hover(); // the next tab slid under the pointer: show its x straight away
         self.invalidate();
     }
 
@@ -1452,6 +1571,15 @@ impl App {
                 }
                 WM_MOUSEWHEEL => {
                     self.on_wheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+                    LRESULT(0)
+                }
+                WM_MOUSEHWHEEL => {
+                    self.on_hwheel(((wp.0 >> 16) & 0xFFFF) as u16 as i16);
+                    LRESULT(0)
+                }
+                WM_MBUTTONUP => {
+                    let (x, y) = window::mouse_xy(lp);
+                    self.on_middle_click(x, y);
                     LRESULT(0)
                 }
                 WM_KEYDOWN => {

@@ -50,8 +50,14 @@ across restarts. If Notch isn't running, the commands just tell you so.
 
 * Several notes, shown as tabs under the header. **`+`** (or `Ctrl+N`) adds one, `Ctrl+Tab` /
   `Ctrl+Shift+Tab` cycles through them.
+* When the tabs no longer fit, the row scrolls (mouse wheel or a sideways touchpad swipe over the
+  header; the active tab is always brought into view) and the **`+`** stays pinned at the right
+  end. Up to 30 notes.
+* **Delete** a note with the **x** on its tab (shown on the active tab and on whichever tab you
+  point at), by middle-clicking it, with `Ctrl+W`, or from the right-click menu. A note with text
+  asks first; the last remaining note is only cleared, never removed.
 * **Double-click** a tab to rename it (Enter saves, Esc cancels). **Right-click** a tab for
-  Rename / Delete (deleting a note that has text asks first). Up to 12 notes.
+  Rename / Delete.
 * Everything is saved automatically, one second after you stop typing.
 
 ### Clipboard

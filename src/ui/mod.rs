@@ -45,6 +45,8 @@ pub enum Hit {
     BtnCollapse,
     Search,
     NoteTab(usize),
+    /// The little x at the right end of a note tab (deletes the note).
+    NoteClose(usize),
     NoteAdd,
     /// Clipboard rows are indexed by their position in the (filtered) list.
     Row(usize),

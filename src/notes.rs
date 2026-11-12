@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::Controls::SetWindowTheme;
@@ -32,7 +31,8 @@ const BG: u32 = 0x0011_0D0B;
 const FG: u32 = 0x00ED_EAE8;
 const EDIT_BG: u32 = 0x0024_1E1B; // #1B1E24, rename box
 
-pub const MAX_NOTES: usize = 12;
+/// The tab row scrolls, so this is only a sanity limit (each note is one small file).
+pub const MAX_NOTES: usize = 30;
 const DEFAULT_NAME: &str = "Quick note";
 
 // ------------------------------------------------------------ note list (pure)
@@ -273,7 +273,7 @@ impl Notes {
             send(h, EM_SETTEXTMODE, TM_PLAINTEXT.0 as usize, 0);
             send(h, EM_SETBKGNDCOLOR, 0, BG as isize);
             let _ = SetWindowTheme(h, w!("DarkMode_Explorer"), PCWSTR::null());
-            apply_font(h, 210, false);
+            apply_font(h, 210, "Segoe UI");
             apply_line_spacing(h);
             self.load_text_into(h);
             // Only now start listening for edits, so the initial load is not "a change".
@@ -360,27 +360,27 @@ impl Notes {
 
     // ---- inline rename box
 
-    /// Shows a one-line editor over a tab. Returns false if it could not be created.
+    /// Shows a one-line editor over a tab's label. Returns false if it could not be created.
+    ///
+    /// The rectangle is just the text strip, one line tall; the rounded box around it is drawn by
+    /// the pill itself (`notes_view`) in the same colour, so the label is vertically centred in a
+    /// proper pill instead of hugging the top of a plain rectangle.
     pub fn begin_rename(&self, owner: HWND, x: i32, y: i32, w: i32, h: i32, text: &str) -> bool {
         unsafe {
             if self.edit.get().0.is_null() {
                 let Some(e) = make_richedit(owner, WINDOW_STYLE(ES_AUTOHSCROLL as u32)) else { return false };
                 send(e, EM_SETTEXTMODE, TM_PLAINTEXT.0 as usize, 0);
                 send(e, EM_SETBKGNDCOLOR, 0, EDIT_BG as isize);
-                apply_font(e, 195, true);
+                // same face and size as the tab label, so the text does not change look or jump
+                apply_font(e, 195, "Segoe UI Semibold");
                 let _ = SetWindowSubclass(e, Some(edit_subclass), 2, 0);
                 self.edit.set(e);
             }
             let e = self.edit.get();
             let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
             let _ = SetWindowTextW(e, PCWSTR(wide.as_ptr()));
-            send(e, EM_SETMARGINS, (EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize, 6 | (6 << 16));
-            let r = (h / 2).max(4);
+            send(e, EM_SETMARGINS, (EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize, 0);
             let _ = SetWindowPos(e, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2);
-            if SetWindowRgn(e, Some(rgn), true) == 0 {
-                let _ = DeleteObject(rgn.into());
-            }
             let _ = SetForegroundWindow(e);
             let _ = SetFocus(Some(e));
             send(e, EM_SETSEL_MSG, 0, -1); // select all
@@ -433,21 +433,22 @@ unsafe fn make_richedit(owner: HWND, extra: WINDOW_STYLE) -> Option<HWND> {
     }
 }
 
-unsafe fn apply_font(h: HWND, height_twips: i32, bold: bool) {
+/// Sets the face, size and (light-on-dark) colour of everything in the control. Weight comes from
+/// the face itself ("Segoe UI Semibold"), never from the bold flag.
+unsafe fn apply_font(h: HWND, height_twips: i32, face: &str) {
     unsafe {
         let mut cf = CHARFORMAT2W {
             Base: CHARFORMATW {
                 cbSize: size_of::<CHARFORMAT2W>() as u32,
                 dwMask: CFM_COLOR | CFM_FACE | CFM_SIZE | CFM_BOLD,
-                dwEffects: if bold { CFE_BOLD } else { CFE_EFFECTS(0) },
+                dwEffects: CFE_EFFECTS(0),
                 yHeight: height_twips,
                 crTextColor: COLORREF(FG),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let face = "Segoe UI";
-        for (i, c) in face.encode_utf16().enumerate() {
+        for (i, c) in face.encode_utf16().take(31).enumerate() {
             cf.Base.szFaceName[i] = c;
         }
         let p = &cf as *const CHARFORMAT2W as isize;
@@ -506,7 +507,29 @@ unsafe extern "system" fn subclass(
                     crate::app::with_app(|a| a.add_note());
                     return LRESULT(0);
                 }
+                0x57 if ctrl && !key_down(0x12) => {
+                    // Ctrl+W closes (deletes) the note being edited; asks first if it has text
+                    crate::app::with_app(|a| a.close_note());
+                    return LRESULT(0);
+                }
                 _ => {}
+            }
+        }
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            // Depending on Windows' "scroll inactive windows" setting, wheel messages go to the
+            // focused window rather than the one under the pointer. When the pointer is over the
+            // pill's own chrome (the note tabs), not over this editor, hand the scroll over to it.
+            let x = (lp.0 & 0xFFFF) as i16 as i32;
+            let y = ((lp.0 >> 16) & 0xFFFF) as i16 as i32;
+            let mut rc = RECT::default();
+            unsafe {
+                let _ = GetWindowRect(hwnd, &mut rc);
+            }
+            if x < rc.left || x >= rc.right || y < rc.top || y >= rc.bottom {
+                let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16;
+                let horizontal = msg == WM_MOUSEHWHEEL;
+                crate::app::with_app(|a| if horizontal { a.on_hwheel(delta) } else { a.on_wheel(delta) });
+                return LRESULT(0);
             }
         }
         WM_SETFOCUS => {
