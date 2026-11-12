@@ -816,6 +816,35 @@ impl App {
         self.invalidate();
     }
 
+    /// The list changed under a stationary pointer (a row was deleted, a new entry arrived):
+    /// hit-test again at the last mouse position, so the hovered row and its pin/x buttons appear
+    /// at once instead of waiting for the next mouse move. While the keyboard is driving, rows
+    /// are not hovered (the selection shows instead); with the pointer outside the pill, nothing is.
+    fn refresh_hover(&self) {
+        if !self.expanded() || self.tab.get() != Tab::Clipboard {
+            return;
+        }
+        if !self.tracking.get() {
+            self.hover.set(Hit::None);
+            return;
+        }
+        let (x, y) = self.mouse.get();
+        let hit = self.hit_at(x, y);
+        if let Hit::Row(k) | Hit::RowPin(k) | Hit::RowDel(k) = hit {
+            if self.kb_mode.get() {
+                self.hover.set(Hit::None);
+            } else {
+                self.hover.set(hit);
+                self.sel.set(Some(k));
+            }
+        } else {
+            self.hover.set(hit);
+        }
+        if crate::log_enabled() {
+            crate::log(&format!("refresh_hover at ({x:.0},{y:.0}) -> {:?} sel={:?}", self.hover.get(), self.sel.get()));
+        }
+    }
+
     /// Moves the keyboard selection in the clipboard list and keeps it scrolled into view.
     fn move_selection(&self, delta: i32) {
         if !self.expanded() || self.tab.get() != Tab::Clipboard {
@@ -1029,7 +1058,7 @@ impl App {
         let n = self.row_count();
         self.sel.set(if n == 0 { None } else { Some(k.min(n - 1)) });
         self.scroll.set(self.scroll.get().min(self.max_scroll()));
-        self.hover.set(Hit::None);
+        self.refresh_hover(); // the next row slid up under the pointer
         self.invalidate();
     }
 
@@ -1359,6 +1388,7 @@ impl App {
             self.sel.set(if n == 0 { None } else { Some(k.min(n - 1)) });
         }
         if self.open.get() {
+            self.refresh_hover(); // rows may have shifted under the pointer
             self.invalidate();
         }
     }
