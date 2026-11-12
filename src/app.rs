@@ -1513,6 +1513,13 @@ impl App {
                     self.reposition();
                     LRESULT(0)
                 }
+                WM_SETTINGCHANGE => {
+                    // light/dark mode switched: the tray icon has a variant for each taskbar
+                    if shell::is_theme_change(lp) {
+                        shell::refresh_tray_icon(hwnd);
+                    }
+                    DefWindowProcW(hwnd, msg, wp, lp)
+                }
                 WM_QUERYENDSESSION | WM_ENDSESSION => {
                     self.notes.flush();
                     DefWindowProcW(hwnd, msg, wp, lp)

@@ -31,12 +31,42 @@ static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
 // ------------------------------------------------------------------ tray
 
-unsafe fn load_icon() -> HICON {
+/// Icon resource ids embedded by build.rs.
+const ICON_TRAY_DARK: usize = 2;
+const ICON_TRAY_LIGHT: usize = 3;
+
+/// True when the taskbar (and so the notification area) uses Windows' light theme.
+fn taskbar_is_light() -> bool {
+    unsafe {
+        let mut key = HKEY::default();
+        let sub = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub, None, KEY_READ, &mut key).is_err() {
+            return false; // value absent on very old builds: dark
+        }
+        let mut data = 0u32;
+        let mut len = size_of::<u32>() as u32;
+        let r = RegQueryValueExW(
+            key,
+            w!("SystemUsesLightTheme"),
+            None,
+            None,
+            Some(&mut data as *mut u32 as *mut u8),
+            Some(&mut len),
+        );
+        let _ = RegCloseKey(key);
+        r.is_ok() && data != 0
+    }
+}
+
+/// The tray icon that reads well on the current taskbar: the bright mark on dark, the
+/// deeper tones on light. The caller owns the handle.
+unsafe fn load_tray_icon() -> HICON {
     unsafe {
         let Ok(hmod) = GetModuleHandleW(None) else { return HICON::default() };
+        let id = if taskbar_is_light() { ICON_TRAY_LIGHT } else { ICON_TRAY_DARK };
         let cx = GetSystemMetrics(SM_CXSMICON);
         let cy = GetSystemMetrics(SM_CYSMICON);
-        LoadImageW(Some(HINSTANCE(hmod.0)), PCWSTR(1 as *const u16), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR)
+        LoadImageW(Some(HINSTANCE(hmod.0)), PCWSTR(id as *const u16), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR)
             .map(|h| HICON(h.0))
             .unwrap_or_default()
     }
@@ -44,21 +74,65 @@ unsafe fn load_icon() -> HICON {
 
 pub fn add_tray(hwnd: HWND, callback_msg: u32, tooltip: &str) -> bool {
     unsafe {
+        let icon = load_tray_icon();
         let mut nid = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: TRAY_ID,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: callback_msg,
-            hIcon: load_icon(),
+            hIcon: icon,
             ..Default::default()
         };
         // szTip holds 128 UTF-16 units including the terminating NUL.
         for (i, c) in tooltip.encode_utf16().take(127).enumerate() {
             nid.szTip[i] = c;
         }
-        Shell_NotifyIconW(NIM_ADD, &nid).as_bool()
+        let ok = Shell_NotifyIconW(NIM_ADD, &nid).as_bool();
+        keep_tray_icon(icon);
+        ok
     }
+}
+
+/// The icon currently shown in the tray. Kept alive for as long as it is shown, and freed
+/// when it is replaced (theme switch, Explorer restart) or removed.
+static TRAY_ICON: AtomicIsize = AtomicIsize::new(0);
+
+fn keep_tray_icon(icon: HICON) {
+    let old = TRAY_ICON.swap(icon.0 as isize, Ordering::Relaxed);
+    if old != 0 {
+        unsafe {
+            let _ = DestroyIcon(HICON(old as *mut core::ffi::c_void));
+        }
+    }
+}
+
+/// Swaps the tray icon to match the taskbar theme (called when Windows' colour mode changes).
+pub fn refresh_tray_icon(hwnd: HWND) {
+    unsafe {
+        let icon = load_tray_icon();
+        let nid = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ID,
+            uFlags: NIF_ICON,
+            hIcon: icon,
+            ..Default::default()
+        };
+        if Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() {
+            keep_tray_icon(icon);
+        } else if !icon.is_invalid() {
+            let _ = DestroyIcon(icon);
+        }
+    }
+}
+
+/// True for the `WM_SETTINGCHANGE` that Windows sends when light/dark mode is switched.
+pub fn is_theme_change(lp: LPARAM) -> bool {
+    if lp.0 == 0 {
+        return false;
+    }
+    unsafe { PCWSTR(lp.0 as *const u16).to_string().map(|s| s == "ImmersiveColorSet").unwrap_or(false) }
 }
 
 pub fn remove_tray(hwnd: HWND) {
@@ -71,6 +145,7 @@ pub fn remove_tray(hwnd: HWND) {
         };
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
     }
+    keep_tray_icon(HICON::default()); // frees the last icon
 }
 
 /// Shows the tray context menu at the cursor and returns the chosen command id (0 = none).

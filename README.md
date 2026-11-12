@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" width="96" alt="Notch logo: a pill split into an amber notepad half and a cyan clipboard half">
+</p>
+
 # Notch
 
 A tiny floating pill at the top-centre of your screen (think Dynamic Island) with a **notepad** and
@@ -19,6 +23,10 @@ almost nothing while idle.
 
 If a hotkey is already owned by another app, Notch falls back to `Ctrl+Alt+N` / `Ctrl+Alt+V` /
 `Ctrl+Alt+H`. The tray tooltip always shows which hotkeys are active.
+
+The logo is a pill split in two: amber for the notepad, cyan for the clipboard. The tray icon uses
+the bright colours on a dark taskbar and deeper tones on a light one, and switches by itself when
+you change Windows' light/dark mode.
 
 ## Commands
 
