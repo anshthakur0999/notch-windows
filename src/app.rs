@@ -7,14 +7,15 @@
 
 use crate::anim::{self, Spring};
 use crate::clipboard::{self, Formats};
-use crate::notes::Notes;
+use crate::notes::{NoteStyle, Notes};
 use crate::peek::{self, Advance, Copied, Peek};
 use crate::render::{self, F, Renderer};
-use crate::settings::Settings;
+use crate::settings::{Accent, Settings, TextSize, Theme};
 use crate::cli::{CMD_HIDE, CMD_QUIT, CMD_SHOW, CMD_TOGGLE};
 use crate::shell::{self, HK_CLIPBOARD, HK_TOGGLE, HK_VISIBILITY};
 use crate::store::{Kind, Store, now_secs};
 use crate::ui::clip_list::{self, ListLayout};
+use crate::ui::theme::Palette;
 use crate::ui::notes_view::{self, NoteTabs};
 use crate::ui::{
     self, COLLAPSED_H, COLLAPSED_W, EXPANDED_H, EXPANDED_W, Hit, HitCtx, PEEK_H, PeekView, Tab, View, WIN_H, WIN_W,
@@ -81,9 +82,20 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetKeyState(vk.0 as i32) < 0 }
 }
 
+/// The colours for the current theme and accent. `Theme::System` follows Windows' app mode.
+fn palette_for(s: &Settings) -> Palette {
+    let light = match s.theme {
+        Theme::Light => true,
+        Theme::Dark => false,
+        Theme::System => shell::apps_use_light_theme(),
+    };
+    Palette::new(light, s.accent)
+}
+
 pub struct App {
     pub hwnd: HWND,
-    pub settings: Settings,
+    /// Loaded from `settings.json`; the tray menu changes the look settings at run time.
+    settings: RefCell<Settings>,
     pub dpi: Cell<u32>,
     origin: Cell<(i32, i32)>,
 
@@ -150,18 +162,24 @@ impl App {
         let _ = std::fs::create_dir_all(&dir);
         let settings = Settings::load(&dir.join("settings.json"));
         let store = Store::open(&dir);
-        let dpi = window::dpi_for(hwnd);
-        let renderer = Renderer::new(
+        // size everything for the display the pill is going to be on
+        let dpi = window::target_dpi(&settings.monitor).unwrap_or_else(|| window::dpi_for(hwnd));
+        let mut renderer = Renderer::new(
             hwnd,
             window::px(WIN_W, dpi) as u32,
             window::px(WIN_H, dpi) as u32,
             dpi as f32,
             settings.use_gpu,
         )?;
+        let pal = palette_for(&settings);
+        let scale = settings.text_size.scale();
+        renderer.set_look(pal, scale);
+        let notes = Notes::new(dir.clone());
+        notes.set_style(NoteStyle::new(&pal, scale));
         let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
         Ok(App {
             hwnd,
-            settings,
+            settings: RefCell::new(settings),
             dpi: Cell::new(dpi),
             origin: Cell::new((0, 0)),
             open: Cell::new(false),
@@ -196,7 +214,7 @@ impl App {
             peek: RefCell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
-            notes: Notes::new(dir),
+            notes,
             clip_formats: clipboard::register_formats(),
             taskbar_created,
             tooltip: RefCell::new(String::from("Notch")),
@@ -207,7 +225,7 @@ impl App {
     /// Positions and shows the pill, registers tray/hotkeys/clipboard listener.
     pub fn startup(&self) {
         let dpi = self.dpi.get();
-        self.origin.set(window::place(self.hwnd, dpi));
+        self.origin.set(window::place(self.hwnd, dpi, &self.cfg().monitor));
         let (w, h) = self.size();
         window::set_region(self.hwnd, dpi, w, h);
         self.render();
@@ -218,16 +236,13 @@ impl App {
             let _ = AddClipboardFormatListener(self.hwnd);
         }
         // Hotkeys first, so the tray tooltip can say which ones are really active.
-        let notes_hk =
-            shell::register_hotkey_or_fallback(self.hwnd, HK_TOGGLE, &self.settings.hotkey_toggle, "Ctrl+Alt+N");
-        let clip_hk =
-            shell::register_hotkey_or_fallback(self.hwnd, HK_CLIPBOARD, &self.settings.hotkey_clipboard, "Ctrl+Alt+V");
-        let vis_hk = shell::register_hotkey_or_fallback(
-            self.hwnd,
-            HK_VISIBILITY,
-            &self.settings.hotkey_visibility,
-            "Ctrl+Alt+H",
-        );
+        let (hk_notes, hk_clip, hk_vis) = {
+            let s = self.cfg();
+            (s.hotkey_toggle.clone(), s.hotkey_clipboard.clone(), s.hotkey_visibility.clone())
+        };
+        let notes_hk = shell::register_hotkey_or_fallback(self.hwnd, HK_TOGGLE, &hk_notes, "Ctrl+Alt+N");
+        let clip_hk = shell::register_hotkey_or_fallback(self.hwnd, HK_CLIPBOARD, &hk_clip, "Ctrl+Alt+V");
+        let vis_hk = shell::register_hotkey_or_fallback(self.hwnd, HK_VISIBILITY, &hk_vis, "Ctrl+Alt+H");
         let show = |h: &Option<String>| h.clone().unwrap_or_else(|| "unavailable".into());
         let tip = format!(
             "Notch - notes: {}, clipboard: {}, hide/show: {}",
@@ -243,6 +258,10 @@ impl App {
 
     pub fn is_animating(&self) -> bool {
         self.animating.get()
+    }
+
+    fn cfg(&self) -> std::cell::Ref<'_, Settings> {
+        self.settings.borrow()
     }
 
     fn size(&self) -> (f32, f32) {
@@ -452,11 +471,13 @@ impl App {
     /// still closing from a big size. Copies that are not recorded (password managers, paused,
     /// our own pastes) never get here.
     pub fn show_copy_peek(&self, copied: Copied) {
-        let s = &self.settings;
-        if !s.copy_peek || self.open.get() || self.is_hidden() || self.h.get().pos > PEEK_H + 8.0 {
+        let (enabled, preview, hold_ms) = {
+            let s = self.cfg();
+            (s.copy_peek, s.copy_peek_preview, s.copy_peek_ms)
+        };
+        if !enabled || self.open.get() || self.is_hidden() || self.h.get().pos > PEEK_H + 8.0 {
             crate::log(&format!(
-                "copy peek skipped: enabled={} open={} hidden={} h={:.0}",
-                s.copy_peek,
+                "copy peek skipped: enabled={enabled} open={} hidden={} h={:.0}",
                 self.open.get(),
                 self.is_hidden(),
                 self.h.get().pos
@@ -467,7 +488,7 @@ impl App {
             let r = self.renderer.borrow();
             let Some(r) = r.as_ref() else { return };
             let label_w = r.text_w(F::Seg, "Copied");
-            peek::compose(copied, s.copy_peek_preview, label_w, |line| r.measure(F::Tab, line))
+            peek::compose(copied, preview, label_w, |line| r.measure(F::Tab, line))
         };
         let target_w = content.target_w;
         let now = Instant::now();
@@ -493,7 +514,7 @@ impl App {
         }
         unsafe {
             // restarting the one-shot timer holds the capsule for another full period
-            SetTimer(Some(self.hwnd), T_PEEK, s.copy_peek_ms, None);
+            SetTimer(Some(self.hwnd), T_PEEK, hold_ms, None);
         }
         self.invalidate();
     }
@@ -612,15 +633,75 @@ impl App {
     /// The GPU device was removed/reset (driver update, GPU hot-swap): rebuild the pipeline.
     fn rebuild_renderer(&self) {
         let dpi = self.dpi.get();
-        if let Ok(r) = Renderer::new(
+        let (use_gpu, pal, scale) = {
+            let s = self.cfg();
+            (s.use_gpu, palette_for(&s), s.text_size.scale())
+        };
+        if let Ok(mut r) = Renderer::new(
             self.hwnd,
             window::px(WIN_W, dpi) as u32,
             window::px(WIN_H, dpi) as u32,
             dpi as f32,
-            self.settings.use_gpu,
+            use_gpu,
         ) {
+            r.set_look(pal, scale);
             *self.renderer.borrow_mut() = Some(r);
             self.invalidate();
+        }
+    }
+
+    // --------------------------------------------------- tray settings (live)
+
+    /// Saves `settings.json` after a change made from the tray menu.
+    fn save_settings(&self) {
+        let path = data_dir().join("settings.json");
+        if let Err(e) = self.cfg().save(&path) {
+            crate::log(&format!("could not save settings: {e}"));
+        }
+    }
+
+    /// Pushes the theme, accent and text size to the renderer and the notepad editors and
+    /// redraws. Cheap enough to call on every change (and when Windows switches light/dark).
+    fn apply_look(&self) {
+        let (pal, scale) = {
+            let s = self.cfg();
+            (palette_for(&s), s.text_size.scale())
+        };
+        if let Some(r) = self.renderer.borrow_mut().as_mut() {
+            r.set_look(pal, scale);
+        }
+        self.notes.set_style(NoteStyle::new(&pal, scale));
+        self.invalidate();
+    }
+
+    /// The display the pill is on changed (menu choice, or displays added/removed).
+    fn move_to_monitor(&self) {
+        crate::log(&format!("monitors: {:?}", window::monitors().iter().map(|m| (&m.name, m.primary)).collect::<Vec<_>>()));
+        self.reposition();
+    }
+
+    /// A choice made in the tray menu's Theme / Accent / Text size / Monitor submenus.
+    fn on_menu_choice(&self, id: u32) {
+        let pick = |base: u32, n: usize| (id >= base && ((id - base) as usize) < n).then(|| (id - base) as usize);
+        if let Some(i) = pick(shell::ID_THEME, Theme::ALL.len()) {
+            self.settings.borrow_mut().theme = Theme::ALL[i];
+            self.save_settings();
+            self.apply_look();
+        } else if let Some(i) = pick(shell::ID_ACCENT, Accent::ALL.len()) {
+            self.settings.borrow_mut().accent = Accent::ALL[i];
+            self.save_settings();
+            self.apply_look();
+        } else if let Some(i) = pick(shell::ID_TEXT, TextSize::ALL.len()) {
+            self.settings.borrow_mut().text_size = TextSize::ALL[i];
+            self.save_settings();
+            self.apply_look();
+        } else if id >= shell::ID_MONITOR {
+            let list = window::monitors();
+            let Some(m) = list.get((id - shell::ID_MONITOR) as usize) else { return };
+            // choosing the primary display stores "follow the primary" rather than its name
+            self.settings.borrow_mut().monitor = if m.primary { String::new() } else { m.name.clone() };
+            self.save_settings();
+            self.move_to_monitor();
         }
     }
 
@@ -734,7 +815,7 @@ impl App {
 
     fn arm_collapse(&self) {
         unsafe {
-            SetTimer(Some(self.hwnd), T_COLLAPSE, self.settings.collapse_delay_ms.max(10), None);
+            SetTimer(Some(self.hwnd), T_COLLAPSE, self.cfg().collapse_delay_ms.max(10), None);
         }
     }
 
@@ -871,7 +952,7 @@ impl App {
             if self.hover_lock.get() || self.dwell_pending.get() || self.is_hidden() {
                 return;
             }
-            let d = self.settings.hover_dwell_ms;
+            let d = self.cfg().hover_dwell_ms;
             if d == 0 {
                 self.expand();
             } else {
@@ -1238,7 +1319,7 @@ impl App {
         if !ok {
             return;
         }
-        let paste = self.settings.paste_on_click && !shift;
+        let paste = self.cfg().paste_on_click && !shift;
         self.collapse(); // also returns focus to the previous window
         if paste {
             unsafe {
@@ -1568,12 +1649,38 @@ impl App {
                 }
             }
             WM_RBUTTONUP | WM_CONTEXTMENU => {
-                match shell::tray_menu(
+                // the display in use (named, else the primary one) is the checked one
+                let monitors = window::monitors();
+                let want = self.cfg().monitor.clone();
+                let current = window::pick_monitor(&monitors, &want).map(|m| m.name.clone());
+                let items: Vec<(String, bool)> = monitors
+                    .iter()
+                    .map(|m| {
+                        let mut label = format!("{} ({} \u{00D7} {})", window::monitor_label(m), m.width, m.height);
+                        if m.primary {
+                            label.push_str(", primary");
+                        }
+                        (label, current.as_deref() == Some(m.name.as_str()))
+                    })
+                    .collect();
+                let (theme, accent, text_size) = {
+                    let s = self.cfg();
+                    (s.theme, s.accent, s.text_size)
+                };
+                let choice = shell::tray_menu(
                     self.hwnd,
-                    self.paused.get(),
-                    shell::autostart_enabled(),
-                    self.user_hidden.get(),
-                ) {
+                    &shell::TrayMenu {
+                        paused: self.paused.get(),
+                        autostart: shell::autostart_enabled(),
+                        pill_hidden: self.user_hidden.get(),
+                        theme,
+                        accent,
+                        text_size,
+                        monitors: &items,
+                        dpi: self.dpi.get(),
+                    },
+                );
+                match choice {
                     shell::ID_OPEN => self.open_from_tray(),
                     shell::ID_VISIBILITY => self.toggle_user_hidden(),
                     shell::ID_PAUSE => {
@@ -1584,7 +1691,8 @@ impl App {
                     shell::ID_QUIT => unsafe {
                         let _ = DestroyWindow(self.hwnd);
                     },
-                    _ => {}
+                    0 => {}
+                    id => self.on_menu_choice(id),
                 }
             }
             _ => {}
@@ -1608,7 +1716,8 @@ impl App {
         if let Some(r) = self.renderer.borrow_mut().as_mut() {
             let _ = r.resize(window::px(WIN_W, dpi) as u32, window::px(WIN_H, dpi) as u32, dpi as f32);
         }
-        self.origin.set(window::place(self.hwnd, dpi));
+        let want = self.cfg().monitor.clone();
+        self.origin.set(window::place(self.hwnd, dpi, &want));
         let (w, h) = self.size();
         window::set_region(self.hwnd, dpi, w, h);
         if self.notes.is_visible() {
@@ -1617,15 +1726,23 @@ impl App {
         self.invalidate();
     }
 
+    /// Puts the pill (back) on its display: after a display change, or when another one is chosen.
+    /// The window is sized for that display's DPI before it moves there.
     fn reposition(&self) {
-        self.on_dpi_changed(window::dpi_for(self.hwnd));
+        let want = self.cfg().monitor.clone();
+        let dpi = window::target_dpi(&want).unwrap_or_else(|| window::dpi_for(self.hwnd));
+        self.on_dpi_changed(dpi);
     }
 
     /// Called after the clipboard history changed (new/updated item): enforce limits, persist.
     pub fn after_store_change(&self) {
         {
             let mut s = self.store.borrow_mut();
-            let removed = s.evict(self.settings.max_items, self.settings.max_image_mb * 1024 * 1024);
+            let (max_items, max_image_mb) = {
+                let c = self.cfg();
+                (c.max_items, c.max_image_mb)
+            };
+            let removed = s.evict(max_items, max_image_mb * 1024 * 1024);
             for it in &removed {
                 s.delete_files(it);
             }
@@ -1771,9 +1888,13 @@ impl App {
                     LRESULT(0)
                 }
                 WM_SETTINGCHANGE => {
-                    // light/dark mode switched: the tray icon has a variant for each taskbar
+                    // light/dark mode switched: the tray icon has a variant for each taskbar, and
+                    // "Match Windows" follows the app mode
                     if shell::is_theme_change(lp) {
                         shell::refresh_tray_icon(hwnd);
+                        if self.cfg().theme == Theme::System {
+                            self.apply_look();
+                        }
                     }
                     DefWindowProcW(hwnd, msg, wp, lp)
                 }

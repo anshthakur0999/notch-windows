@@ -21,6 +21,8 @@ use windows::Win32::System::Com::*;
 use windows::core::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::ui::theme::Palette;
+
 /// Text styles. The discriminant indexes `Fonts::v`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum F {
@@ -29,8 +31,6 @@ pub enum F {
     Tab,
     TabOn,
     Title,
-    Sub,
-    Mono,
     Section,
     Hint,
     Keycap,
@@ -39,6 +39,11 @@ pub enum F {
     Icon12,
     Icon14,
     Icon16,
+    /// Clipboard entries: title, subtitle and code. These follow the "text size" setting; the
+    /// header, tabs, hints and key caps keep a fixed size.
+    Row,
+    RowSub,
+    RowMono,
 }
 
 pub struct Fonts {
@@ -61,6 +66,9 @@ pub struct Renderer {
     /// Decoded thumbnails, only kept while the pill is open.
     pub thumbs: HashMap<u64, ID2D1Bitmap1>,
     dpi: f32,
+    /// The current colours and the scale of the clipboard-entry text (see `set_look`).
+    pub pal: Palette,
+    pub text_scale: f32,
 }
 
 pub fn color(hex: u32, a: f32) -> D2D1_COLOR_F {
@@ -166,7 +174,7 @@ impl Renderer {
             let pin_geom = make_pin_geometry(&d2d)?;
 
             let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let fonts = make_fonts(&dw)?;
+            let fonts = make_fonts(&dw, 1.0)?;
 
             let r = Renderer {
                 swap,
@@ -183,9 +191,24 @@ impl Renderer {
                 wic: None,
                 thumbs: HashMap::new(),
                 dpi,
+                pal: Palette::default(),
+                text_scale: 1.0,
             };
             r.attach_target()?;
             Ok(r)
+        }
+    }
+
+    /// Switches colours and the size of the clipboard-entry text (tray menu, live). Fonts are only
+    /// rebuilt when the size changed.
+    pub fn set_look(&mut self, pal: Palette, text_scale: f32) {
+        self.pal = pal;
+        if (text_scale - self.text_scale).abs() > 0.001 {
+            if let Ok(fonts) = make_fonts(&self.dw, text_scale) {
+                self.fonts = fonts;
+                self.text_scale = text_scale;
+                self.widths.borrow_mut().clear();
+            }
         }
     }
 
@@ -552,7 +575,7 @@ fn make_format(
     }
 }
 
-fn make_fonts(dw: &IDWriteFactory) -> Result<Fonts> {
+fn make_fonts(dw: &IDWriteFactory, k: f32) -> Result<Fonts> {
     let ui = if has_family(dw, w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
     let mono = if has_family(dw, w!("Cascadia Mono")) { w!("Cascadia Mono") } else { w!("Consolas") };
     let icons =
@@ -565,8 +588,6 @@ fn make_fonts(dw: &IDWriteFactory) -> Result<Fonts> {
         make_format(dw, ui, 13.0, n, false)?,    // Tab
         make_format(dw, ui, 13.0, sb, false)?,   // TabOn
         make_format(dw, ui, 14.0, n, false)?,    // Title
-        make_format(dw, ui, 11.5, n, false)?,    // Sub
-        make_format(dw, mono, 11.0, n, false)?,  // Mono
         make_format(dw, ui, 11.0, sb, false)?,   // Section
         make_format(dw, ui, 12.0, n, false)?,    // Hint
         make_format(dw, ui, 11.5, sb, true)?,    // Keycap
@@ -574,6 +595,9 @@ fn make_fonts(dw: &IDWriteFactory) -> Result<Fonts> {
         make_format(dw, icons, 12.0, n, true)?,  // Icon12
         make_format(dw, icons, 14.0, n, true)?,  // Icon14
         make_format(dw, icons, 16.0, n, true)?,  // Icon16
+        make_format(dw, ui, 14.0 * k, n, false)?,   // Row
+        make_format(dw, ui, 11.5 * k, n, false)?,   // RowSub
+        make_format(dw, mono, 11.0 * k, n, false)?, // RowMono
     ];
     Ok(Fonts { v })
 }

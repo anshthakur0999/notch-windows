@@ -110,7 +110,7 @@ pub fn draw(r: &mut Renderer, v: &View, alpha: f32) {
         } else {
             format!("No matches for \u{201C}{}\u{201D}", v.query.trim())
         };
-        r.text(&msg, F::Center, vp.d2d(), color(0x6E747D, alpha));
+        r.text(&msg, F::Center, vp.d2d(), color(r.pal.faint, alpha));
     }
     for &(y, label) in &v.list.headers {
         let top = p.t + LIST_TOP + y - v.scroll;
@@ -118,7 +118,7 @@ pub fn draw(r: &mut Renderer, v: &View, alpha: f32) {
             continue;
         }
         let rect = RectF { l: p.l + 19.5, t: top, r: p.l + 220.0, b: top + HDR_H };
-        r.text_spaced(label, F::Section, rect.d2d(), color(0x8A9099, alpha), 1.0);
+        r.text_spaced(label, F::Section, rect.d2d(), color(r.pal.subtle, alpha), 1.0);
     }
     for (k, &(idx, y)) in v.list.rows.iter().enumerate() {
         let rect = row_rect(y, v.scroll);
@@ -133,21 +133,22 @@ pub fn draw(r: &mut Renderer, v: &View, alpha: f32) {
 }
 
 fn draw_search(r: &Renderer, v: &View, alpha: f32) {
+    let pal = r.pal;
     let s = search_rect();
-    r.fill_rrect(s.d2d(), s.h() / 2.0, color(0x16181D, alpha));
-    r.glyph('\u{E721}', F::Icon16, s.l + 22.0, s.cy(), color(0x9AA0A8, alpha));
+    r.fill_rrect(s.d2d(), s.h() / 2.0, color(pal.field, alpha));
+    r.glyph('\u{E721}', F::Icon16, s.l + 22.0, s.cy(), color(pal.muted, alpha));
 
     let text_l = s.l + 41.0;
     let text = RectF { l: text_l, t: s.t, r: s.r - 16.0, b: s.b };
     if v.query.is_empty() {
-        r.text("Search clipboard history", F::Title, text.d2d(), color(0x8B919A, alpha));
+        r.text("Search clipboard history", F::Title, text.d2d(), color(pal.subtle, alpha));
     } else {
-        r.text(v.query, F::Title, text.d2d(), color(0xF1F3F5, alpha));
+        r.text(v.query, F::Title, text.d2d(), color(pal.text, alpha));
     }
     if v.focused {
         let w = if v.query.is_empty() { 0.0 } else { r.text_w(F::Title, v.query) };
         let x = (text_l + w + 1.0).min(text.r);
-        r.line(x, s.cy() - 8.5, x, s.cy() + 8.5, color(0xE6E8EB, alpha * 0.9), 1.2);
+        r.line(x, s.cy() - 8.5, x, s.cy() + 8.5, color(pal.text, alpha * 0.9), 1.2);
     }
 }
 
@@ -156,10 +157,11 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
     let selected = v.sel == Some(k);
     let hovered = matches!(v.hover, Hit::Row(j) | Hit::RowPin(j) | Hit::RowDel(j) if j == k);
     let cy = rect.cy();
+    let pal = r.pal;
 
     if selected {
-        r.fill_rrect(rect.d2d(), 12.0, color(0x142229, alpha));
-        r.stroke_rrect(rect.inset(0.6).d2d(), 11.4, color(0x2B6577, alpha), 1.2);
+        r.fill_rrect(rect.d2d(), 12.0, color(pal.sel_fill(), alpha));
+        r.stroke_rrect(rect.inset(0.6).d2d(), 11.4, color(pal.sel_edge(), alpha), 1.2);
     }
 
     // ---- leading icon / thumbnail ----
@@ -167,7 +169,7 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
     match item.kind {
         Kind::Image => {
             let bx = RectF { l: rect.l + 10.0, t: cy - 17.0, r: rect.l + 57.6, b: cy + 17.0 };
-            r.fill_rrect(bx.d2d(), 7.0, color(0x1B1E24, alpha));
+            r.fill_rrect(bx.d2d(), 7.0, color(pal.tile, alpha));
             match r.thumb(item.id, &v.store.thumb_path(item.id)) {
                 Some(bmp) => {
                     let ar = if item.height > 0 { item.width as f32 / item.height as f32 } else { 1.0 };
@@ -185,12 +187,12 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
                     };
                     r.draw_bitmap(&bmp, dest.d2d(), alpha);
                 }
-                None => r.glyph('\u{E91B}', F::Icon16, bx.cx(), bx.cy(), color(0x9AA0A8, alpha)),
+                None => r.glyph('\u{E91B}', F::Icon16, bx.cx(), bx.cy(), color(pal.muted, alpha)),
             }
             text_l = bx.r + 10.3;
         }
         Kind::Text => {
-            let c = color(if selected { 0x4FC3F7 } else { 0x9AA0A8 }, alpha);
+            let c = color(if selected { pal.clip } else { pal.muted }, alpha);
             let cx = rect.l + 18.6;
             match item.sub {
                 Sub::Plain => r.glyph('\u{E8E4}', F::Icon14, cx, cy, c),
@@ -221,33 +223,36 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
             14.0
         };
     let (title, font) = match item.kind {
-        Kind::Image => ("Image", F::Title),
-        Kind::Text => (item.preview.as_str(), if item.sub == Sub::Code { F::Mono } else { F::Title }),
+        Kind::Image => ("Image", F::Row),
+        Kind::Text => (item.preview.as_str(), if item.sub == Sub::Code { F::RowMono } else { F::Row }),
     };
-    let title_r = RectF { l: text_l, t: cy - 15.5, r: right_limit.max(text_l + 10.0), b: cy + 0.5 };
-    r.text(title, font, title_r.d2d(), color(0xF1F3F5, alpha));
+    // each line gets a box as tall as its text, so the "text size" setting does not clip it
+    let line_h = 16.0 * r.text_scale;
+    let title_r = RectF { l: text_l, t: cy + 0.5 - line_h, r: right_limit.max(text_l + 10.0), b: cy + 0.5 };
+    r.text(title, font, title_r.d2d(), color(pal.text, alpha));
 
     let label = item.sub.label(item.kind);
     let subtitle = if item.pinned { label.to_string() } else { format!("{label} \u{00B7} {}", ago(v.now, item.ts)) };
-    let sub_r = RectF { l: text_l, t: cy - 0.5, r: title_r.r, b: cy + 15.5 };
-    r.text(&subtitle, F::Sub, sub_r.d2d(), color(0x8E949D, alpha));
+    let sub_r = RectF { l: text_l, t: cy - 0.5, r: title_r.r, b: cy - 0.5 + line_h };
+    r.text(&subtitle, F::RowSub, sub_r.d2d(), color(pal.subtle, alpha));
 
     // ---- trailing controls ----
     if selected && v.kb_mode {
         pill::keycap(r, "Enter", rect.r - 10.0 - keycap_w, cy, alpha);
     } else if hovered {
         let pin_hover = v.hover == Hit::RowPin(k);
-        let pin_c = if item.pinned { pill::PIN_AMBER } else if pin_hover { 0xFFFFFF } else { 0x8E949D };
+        let pin_c = if item.pinned { pal.pin } else if pin_hover { pal.text } else { pal.subtle };
         r.pin(rect.r - 51.0, cy, 14.0, color(pin_c, alpha), item.pinned);
-        let del_c = if v.hover == Hit::RowDel(k) { 0xFF6B6B } else { 0x8E949D };
+        let del_c = if v.hover == Hit::RowDel(k) { pal.danger } else { pal.subtle };
         r.glyph('\u{E711}', F::Icon12, rect.r - 21.0, cy, color(del_c, alpha));
     } else if item.pinned {
-        r.pin(rect.r - 18.0, cy, 14.0, color(pill::PIN_AMBER, alpha), true);
+        r.pin(rect.r - 18.0, cy, 14.0, color(pal.pin, alpha), true);
     }
 }
 
 fn draw_footer(r: &Renderer, alpha: f32, paused: bool) {
     let p = exp();
+    let pal = r.pal;
     pill::hline(r, p.t + FOOTER_SEP, alpha);
     let cy = p.t + FOOTER_CY;
     if paused {
@@ -258,7 +263,7 @@ fn draw_footer(r: &Renderer, alpha: f32, paused: bool) {
             label,
             F::Hint,
             RectF { l: p.r - 18.0 - w, t: cy - 9.0, r: p.r - 14.0, b: cy + 9.0 }.d2d(),
-            color(pill::AMBER, alpha),
+            color(pal.pin, alpha),
         );
     }
     let mut x = p.l + 19.5;
@@ -269,7 +274,7 @@ fn draw_footer(r: &Renderer, alpha: f32, paused: bool) {
             label,
             F::Hint,
             RectF { l: right + 6.0, t: cy - 9.0, r: right + 6.0 + lw + 4.0, b: cy + 9.0 }.d2d(),
-            color(0x9AA0A8, alpha),
+            color(pal.muted, alpha),
         );
         x = right + 6.0 + lw + 14.0;
     }

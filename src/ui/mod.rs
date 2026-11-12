@@ -7,6 +7,7 @@
 pub mod clip_list;
 pub mod notes_view;
 pub mod pill;
+pub mod theme;
 
 use crate::store::{ClipItem, Store};
 use clip_list::ListLayout;

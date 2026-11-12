@@ -155,6 +155,7 @@ pub fn layout(r: &Renderer, names: &[String], renaming: Option<usize>, scroll: f
 
 pub fn draw(r: &Renderer, v: &View, alpha: f32) {
     let p = exp();
+    let pal = r.pal;
     pill::hline(r, p.t + 88.0, alpha);
 
     // The tabs scroll: everything about them is clipped to the row's viewport. The clip is a few
@@ -173,29 +174,29 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
         if v.renaming != Some(i) {
             let text = RectF { l: rect.l + LABEL_INSET, t: rect.t, r: rect.r - LABEL_INSET - slot, b: p.t + 82.0 };
             let c = if active {
-                0xF2F3F5
+                pal.text
             } else if hover {
-                0xC9CDD3
+                pal.text2
             } else {
-                0x9BA1AB
+                pal.muted
             };
             let name = v.note_names.get(i).map(String::as_str).unwrap_or("");
             r.text(name, if active { F::TabOn } else { F::Tab }, text.d2d(), color(c, alpha));
             // the delete "x": on the active tab and whichever tab the pointer is on
             if v.note_tabs.closable && (active || hover) {
                 let xc = if on_close {
-                    0xFF6B6B
+                    pal.danger
                 } else if active {
-                    0x8E949D
+                    pal.subtle
                 } else {
-                    0x6F7682
+                    pal.faint
                 };
                 r.glyph('\u{E711}', F::Icon12, rect.r - CLOSE_CX, p.t + 68.0, color(xc, alpha));
             }
         }
         if active {
             let u = RectF { l: rect.l, t: p.t + 86.6, r: rect.r, b: p.t + 88.6 };
-            r.fill_rrect(u.d2d(), 1.0, color(pill::AMBER, alpha));
+            r.fill_rrect(u.d2d(), 1.0, color(pal.notes, alpha));
         }
     }
     // The rename box goes last so it sits over neighbouring tabs; the native editor (same fill
@@ -203,8 +204,8 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
     if let Some(tab) = v.renaming.and_then(|i| v.note_tabs.tabs.get(i)) {
         let b = rename_box(tab);
         let radius = b.h() / 2.0;
-        r.fill_rrect(b.d2d(), radius, color(0x1B1E24, alpha));
-        r.stroke_rrect(b.d2d(), radius, color(pill::AMBER, alpha * 0.55), 1.0);
+        r.fill_rrect(b.d2d(), radius, color(pal.tile, alpha));
+        r.stroke_rrect(b.d2d(), radius, color(pal.notes, alpha * 0.55), 1.0);
     }
     // Soft edges where tabs run on past the viewport (a stepped fade into the pill's colour).
     let nt = v.note_tabs;
@@ -215,29 +216,29 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
         let x = k as f32 * STEP_W;
         if nt.scroll > 0.5 {
             let s = RectF { l: nt.view.l + x, t: nt.view.t, r: nt.view.l + x + STEP_W, b: nt.view.b };
-            r.fill_rect(s.d2d(), color(pill::BODY, alpha * a));
+            r.fill_rect(s.d2d(), color(pal.body, alpha * a));
         }
         if nt.scroll < nt.max_scroll - 0.5 {
             let s = RectF { l: nt.view.r - x - STEP_W, t: nt.view.t, r: nt.view.r - x, b: nt.view.b };
-            r.fill_rect(s.d2d(), color(pill::BODY, alpha * a));
+            r.fill_rect(s.d2d(), color(pal.body, alpha * a));
         }
     }
     r.pop_clip();
 
     if let Some(a) = v.note_tabs.add {
-        let c = if v.hover == Hit::NoteAdd { 0xE6E8EB } else { 0x9BA1AB };
+        let c = if v.hover == Hit::NoteAdd { pal.text } else { pal.muted };
         r.glyph('\u{E710}', F::Icon14, a.cx(), p.t + 68.0, color(c, alpha));
     }
 
     // ---- footer ----
     pill::hline(r, p.t + FOOTER_SEP, alpha);
     let cy = p.t + FOOTER_CY;
-    r.glyph('\u{E73E}', F::Icon14, p.l + 26.0, cy, color(pill::AMBER, alpha));
+    r.glyph('\u{E73E}', F::Icon14, p.l + 26.0, cy, color(pal.notes, alpha));
     r.text(
         "Saved automatically",
         F::Hint,
         RectF { l: p.l + 40.0, t: cy - 9.0, r: p.l + 220.0, b: cy + 9.0 }.d2d(),
-        color(0x9AA0A8, alpha),
+        color(pal.muted, alpha),
     );
 
     let label = "to collapse";
@@ -247,7 +248,7 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
         label,
         F::Hint,
         RectF { l: label_l, t: cy - 9.0, r: label_l + lw + 4.0, b: cy + 9.0 }.d2d(),
-        color(0x9AA0A8, alpha),
+        color(pal.muted, alpha),
     );
     let key_w = pill::keycap_width(r, "Esc");
     pill::keycap(r, "Esc", label_l - 7.0 - key_w, cy, alpha);

@@ -19,10 +19,24 @@ almost nothing while idle.
 | Keep open | The pin in the header: the pill stays open until you unpin it, press `Esc`, or click the chevron |
 | Close | Move the mouse away, `Esc`, the chevron, or click another app |
 | Hide / show the pill | `Win+Alt+H`, the tray menu, or the commands below |
-| Tray icon | Open · Hide/Show pill · Pause clipboard capture · Start with Windows · Quit |
+| Tray icon | Open · Hide/Show pill · Theme · Accent colour · Text size · Monitor · Pause clipboard capture · Start with Windows · Quit |
 
 If a hotkey is already owned by another app, Notch falls back to `Ctrl+Alt+N` / `Ctrl+Alt+V` /
 `Ctrl+Alt+H`. The tray tooltip always shows which hotkeys are active.
+
+### Look and monitor (tray menu)
+
+Right-click the tray icon. These apply immediately and are saved to `settings.json`, so there is
+nothing to edit and no restart:
+
+* **Theme**: Dark (default), Light, or Match Windows (follows Windows' app light/dark mode and
+  switches with it).
+* **Accent colour**: Classic keeps the logo's two tones (amber notepad, cyan clipboard); Sky, Amber,
+  Mint, Violet and Rose use one colour for both tabs, the selected entry and the copy peek's check.
+* **Text size**: Small, Default or Large for the text you read: the notes and the clipboard
+  entries. The header, tabs and hints keep their size.
+* **Monitor**: which display the pill sits on. It follows the primary display unless you pick another
+  one, and goes back to the primary one if the chosen display is unplugged.
 
 ### Copy peek
 
@@ -107,9 +121,18 @@ Optional file: `%APPDATA%\Notch\settings.json` (all keys optional; restart to ap
   "copy_peek": true,
   "copy_peek_preview": true,
   "copy_peek_ms": 2000,
+  "theme": "dark",
+  "accent": "classic",
+  "text_size": "medium",
+  "monitor": "",
   "use_gpu": false
 }
 ```
+
+`theme` is `dark`, `light` or `system`; `accent` is `classic`, `sky`, `amber`, `mint`, `violet` or
+`rose`; `text_size` is `small`, `medium` or `large`; `monitor` is a display's device name such as
+`\\.\DISPLAY2` (empty = the primary display). The first four are what the tray menu changes; Notch
+rewrites the file when you use it, and a word it does not know falls back to the default.
 
 `use_gpu` is off by default: drawing a pill is trivial work, and using the GPU makes Windows load the
 graphics vendor's user-mode driver, which cost ~55 MB more RAM in testing (Intel). The software

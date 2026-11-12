@@ -8,6 +8,88 @@ pub const MOD_CONTROL: u32 = 0x0002;
 pub const MOD_SHIFT: u32 = 0x0004;
 pub const MOD_WIN: u32 = 0x0008;
 
+/// A setting that is one of a few named choices, stored in JSON as a lowercase word. An
+/// unknown or mistyped word falls back to the default instead of invalidating the whole file.
+macro_rules! choice {
+    ($(#[$m:meta])* $name:ident { $($var:ident => $text:literal),+ $(,)? } default $def:ident) => {
+        $(#[$m])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum $name {
+            $($var),+
+        }
+
+        impl $name {
+            pub const ALL: &'static [$name] = &[$($name::$var),+];
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $($name::$var => $text),+
+                }
+            }
+
+            pub fn parse(s: &str) -> $name {
+                let s = s.trim();
+                $(if s.eq_ignore_ascii_case($text) {
+                    return $name::$var;
+                })+
+                $name::$def
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                $name::$def
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.name())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let v = serde_json::Value::deserialize(d)?;
+                Ok($name::parse(v.as_str().unwrap_or("")))
+            }
+        }
+    };
+}
+
+choice! {
+    /// Light or dark pill. `System` follows Windows' app colour mode and switches with it.
+    Theme { System => "system", Dark => "dark", Light => "light" } default Dark
+}
+
+choice! {
+    /// Highlight colour. `Classic` keeps the logo's two tones (amber notepad, cyan clipboard);
+    /// the others use one colour for both.
+    Accent {
+        Classic => "classic",
+        Sky => "sky",
+        Amber => "amber",
+        Mint => "mint",
+        Violet => "violet",
+        Rose => "rose",
+    } default Classic
+}
+
+choice! {
+    /// Size of the text you read: the notes and the clipboard entries.
+    TextSize { Small => "small", Medium => "medium", Large => "large" } default Medium
+}
+
+impl TextSize {
+    pub fn scale(self) -> f32 {
+        match self {
+            TextSize::Small => 0.9,
+            TextSize::Medium => 1.0,
+            TextSize::Large => 1.15,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -36,6 +118,15 @@ pub struct Settings {
     /// Draw on the GPU. Off (default) uses Microsoft's WARP software rasteriser, which avoids
     /// loading the vendor graphics driver (often 50+ MB of RAM) for what is a tiny drawing job.
     pub use_gpu: bool,
+    /// Light or dark pill (also in the tray menu, applied immediately).
+    pub theme: Theme,
+    /// Highlight colour (tray menu).
+    pub accent: Accent,
+    /// Size of notes and clipboard text (tray menu).
+    pub text_size: TextSize,
+    /// Which monitor the pill sits on: the display's device name (`\\.\DISPLAY2`), or empty for
+    /// the primary one. If that display is not connected the primary one is used (tray menu).
+    pub monitor: String,
 }
 
 impl Default for Settings {
@@ -53,6 +144,10 @@ impl Default for Settings {
             copy_peek_preview: true,
             copy_peek_ms: 2000,
             use_gpu: false,
+            theme: Theme::default(),
+            accent: Accent::default(),
+            text_size: TextSize::default(),
+            monitor: String::new(),
         }
     }
 }
@@ -68,7 +163,20 @@ impl Settings {
         s.max_items = s.max_items.clamp(10, 5000);
         s.max_image_mb = s.max_image_mb.clamp(10, 10_000);
         s.copy_peek_ms = s.copy_peek_ms.clamp(500, 10_000);
+        s.monitor = s.monitor.trim().to_string();
         s
+    }
+
+    /// Writes the settings back (the tray menu changes them). A file that could not be read is
+    /// kept as `settings.json.bad` instead of being overwritten.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).is_err() {
+                let _ = std::fs::rename(path, path.with_extension("json.bad"));
+            }
+        }
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        crate::store::write_atomic(path, json.as_bytes())
     }
 }
 
@@ -172,6 +280,61 @@ mod tests {
         assert_eq!(s.copy_peek_ms, 500); // clamped up
         assert!(s.copy_peek); // default
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn choices_parse_leniently_and_bad_words_do_not_reset_the_file() {
+        let dir = std::env::temp_dir().join(format!("notch-settings-choice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        std::fs::write(
+            &p,
+            r#"{ "theme": "Light", "accent": "chartreuse", "text_size": 7, "monitor": "  \\\\.\\DISPLAY2 ", "max_items": 77 }"#,
+        )
+        .unwrap();
+        let s = Settings::load(&p);
+        assert_eq!(s.theme, Theme::Light); // case-insensitive
+        assert_eq!(s.accent, Accent::Classic); // unknown word: the default
+        assert_eq!(s.text_size, TextSize::Medium); // wrong type: the default
+        assert_eq!(s.monitor, r"\\.\DISPLAY2"); // trimmed
+        assert_eq!(s.max_items, 77, "one bad choice must not reset the other settings");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_round_trips_and_keeps_an_unreadable_file() {
+        let dir = std::env::temp_dir().join(format!("notch-settings-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        let mut s = Settings::default();
+        s.theme = Theme::System;
+        s.accent = Accent::Violet;
+        s.text_size = TextSize::Large;
+        s.monitor = r"\\.\DISPLAY2".into();
+        s.max_items = 321;
+        s.save(&p).unwrap();
+        assert_eq!(Settings::load(&p), s);
+        // a broken file is moved aside, not silently destroyed
+        std::fs::write(&p, "{ my careful edits").unwrap();
+        s.save(&p).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), "{ my careful edits");
+        assert_eq!(Settings::load(&p), s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn text_sizes_grow_and_every_choice_round_trips_by_name() {
+        assert!(TextSize::Small.scale() < TextSize::Medium.scale() && TextSize::Medium.scale() < TextSize::Large.scale());
+        assert_eq!(TextSize::Medium.scale(), 1.0);
+        for t in Theme::ALL {
+            assert_eq!(Theme::parse(t.name()), *t);
+        }
+        for a in Accent::ALL {
+            assert_eq!(Accent::parse(a.name()), *a);
+        }
+        for t in TextSize::ALL {
+            assert_eq!(TextSize::parse(t.name()), *t);
+        }
     }
 
     #[test]

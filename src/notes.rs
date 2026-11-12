@@ -9,6 +9,7 @@
 //! `notes.txt` from an earlier version is migrated into the first note.
 
 use crate::store::write_atomic;
+use crate::ui::theme::Palette;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -26,10 +27,41 @@ const EM_SETSEL_MSG: u32 = 0x00B1;
 const EM_EMPTYUNDOBUFFER: u32 = 0x00CD;
 const EM_SETPARAFORMAT_MSG: u32 = 0x0447;
 
-/// COLORREF (0x00BBGGRR) values matching the pill body (#0B0D11) and text (#E8EAED).
-const BG: u32 = 0x0011_0D0B;
-const FG: u32 = 0x00ED_EAE8;
-const EDIT_BG: u32 = 0x0024_1E1B; // #1B1E24, rename box
+/// Colours and text size of the two native editors (the note and the rename box), taken from the
+/// pill's palette so they match whichever theme is on. Changed live from the tray menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoteStyle {
+    /// 0xRRGGBB: the note's background (the panel colour) and text, and the rename box's fill.
+    pub bg: u32,
+    pub fg: u32,
+    pub tile: u32,
+    /// Dark scroll bar (dark theme) or the normal one.
+    pub dark: bool,
+    /// Text size multiplier for the note (the rename box matches the tab labels and stays fixed).
+    pub scale: f32,
+}
+
+impl NoteStyle {
+    pub fn new(pal: &Palette, scale: f32) -> NoteStyle {
+        NoteStyle { bg: pal.body, fg: pal.editor_text, tile: pal.tile, dark: !pal.light, scale }
+    }
+}
+
+impl Default for NoteStyle {
+    fn default() -> Self {
+        NoteStyle::new(&Palette::default(), 1.0)
+    }
+}
+
+/// 0xRRGGBB -> COLORREF (0x00BBGGRR).
+fn cref(rgb: u32) -> u32 {
+    ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+}
+
+/// Editor text height in twips (1/20 pt) for the note: 10.5 pt, scaled.
+fn note_twips(scale: f32) -> i32 {
+    (210.0 * scale).round() as i32
+}
 
 /// The tab row scrolls, so this is only a sanity limit (each note is one small file).
 pub const MAX_NOTES: usize = 30;
@@ -139,6 +171,7 @@ pub struct Notes {
     dir: PathBuf,
     meta: RefCell<Meta>,
     dirty: Cell<bool>,
+    style: Cell<NoteStyle>,
 }
 
 impl Notes {
@@ -150,6 +183,23 @@ impl Notes {
             dir,
             meta: RefCell::new(meta),
             dirty: Cell::new(false),
+            style: Cell::new(NoteStyle::default()),
+        }
+    }
+
+    /// Sets the editors' colours and text size. Editors that do not exist yet pick them up when
+    /// they are created; existing ones are restyled now.
+    pub fn set_style(&self, style: NoteStyle) {
+        self.style.set(style);
+        unsafe {
+            let h = self.hwnd.get();
+            if !h.0.is_null() {
+                style_note(h, &style);
+            }
+            let e = self.edit.get();
+            if !e.0.is_null() {
+                style_rename(e, &style);
+            }
         }
     }
 
@@ -271,9 +321,7 @@ impl Notes {
             };
             self.hwnd.set(h);
             send(h, EM_SETTEXTMODE, TM_PLAINTEXT.0 as usize, 0);
-            send(h, EM_SETBKGNDCOLOR, 0, BG as isize);
-            let _ = SetWindowTheme(h, w!("DarkMode_Explorer"), PCWSTR::null());
-            apply_font(h, 210, "Segoe UI");
+            style_note(h, &self.style.get());
             apply_line_spacing(h);
             self.load_text_into(h);
             // Only now start listening for edits, so the initial load is not "a change".
@@ -370,9 +418,7 @@ impl Notes {
             if self.edit.get().0.is_null() {
                 let Some(e) = make_richedit(owner, WINDOW_STYLE(ES_AUTOHSCROLL as u32)) else { return false };
                 send(e, EM_SETTEXTMODE, TM_PLAINTEXT.0 as usize, 0);
-                send(e, EM_SETBKGNDCOLOR, 0, EDIT_BG as isize);
-                // same face and size as the tab label, so the text does not change look or jump
-                apply_font(e, 195, "Segoe UI Semibold");
+                style_rename(e, &self.style.get());
                 let _ = SetWindowSubclass(e, Some(edit_subclass), 2, 0);
                 self.edit.set(e);
             }
@@ -433,9 +479,28 @@ unsafe fn make_richedit(owner: HWND, extra: WINDOW_STYLE) -> Option<HWND> {
     }
 }
 
-/// Sets the face, size and (light-on-dark) colour of everything in the control. Weight comes from
+/// Colours, scroll bar and text of the note editor.
+unsafe fn style_note(h: HWND, s: &NoteStyle) {
+    unsafe {
+        send(h, EM_SETBKGNDCOLOR, 0, cref(s.bg) as isize);
+        let theme = if s.dark { w!("DarkMode_Explorer") } else { w!("Explorer") };
+        let _ = SetWindowTheme(h, theme, PCWSTR::null());
+        apply_font(h, note_twips(s.scale), "Segoe UI", s.fg);
+    }
+}
+
+/// The rename box's fill and text. Same face and size as the tab label, so the text does not
+/// change look or jump.
+unsafe fn style_rename(e: HWND, s: &NoteStyle) {
+    unsafe {
+        send(e, EM_SETBKGNDCOLOR, 0, cref(s.tile) as isize);
+        apply_font(e, 195, "Segoe UI Semibold", s.fg);
+    }
+}
+
+/// Sets the face, size and colour (0xRRGGBB) of everything in the control. Weight comes from
 /// the face itself ("Segoe UI Semibold"), never from the bold flag.
-unsafe fn apply_font(h: HWND, height_twips: i32, face: &str) {
+unsafe fn apply_font(h: HWND, height_twips: i32, face: &str, text_rgb: u32) {
     unsafe {
         let mut cf = CHARFORMAT2W {
             Base: CHARFORMATW {
@@ -443,7 +508,7 @@ unsafe fn apply_font(h: HWND, height_twips: i32, face: &str) {
                 dwMask: CFM_COLOR | CFM_FACE | CFM_SIZE | CFM_BOLD,
                 dwEffects: CFE_EFFECTS(0),
                 yHeight: height_twips,
-                crTextColor: COLORREF(FG),
+                crTextColor: COLORREF(cref(text_rgb)),
                 ..Default::default()
             },
             ..Default::default()
