@@ -15,6 +15,11 @@ pub struct Spring {
 pub const FREQ: f32 = 3.4;
 pub const ZETA: f32 = 0.78;
 
+/// Closing is stiffer and critically damped: the pill snaps shut quickly and, unlike the
+/// opening spring, never bounces below its resting size.
+pub const CLOSE_FREQ: f32 = 7.0;
+pub const CLOSE_ZETA: f32 = 1.0;
+
 const MAX_STEP: f32 = 1.0 / 240.0;
 
 impl Spring {
@@ -26,13 +31,21 @@ impl Spring {
         self.target = t;
     }
 
-    /// Advances the simulation by `dt` seconds using small, fixed sub-steps so the result
-    /// is stable regardless of the frame rate.
+    /// Advances the simulation by `dt` seconds with the opening spring (the app picks the
+    /// spring itself via `step_with`; this is the shorthand the tests use).
+    #[cfg(test)]
     pub fn step(&mut self, dt: f32) {
+        self.step_with(dt, FREQ, ZETA);
+    }
+
+    /// Advances the simulation by `dt` seconds using small, fixed sub-steps so the result
+    /// is stable regardless of the frame rate. Position and velocity carry over between
+    /// calls, so switching `freq`/`zeta` mid-flight (open <-> close) never makes a jump.
+    pub fn step_with(&mut self, dt: f32, freq: f32, zeta: f32) {
         let dt = dt.clamp(0.0, 0.05);
-        let w = 2.0 * std::f32::consts::PI * FREQ;
+        let w = 2.0 * std::f32::consts::PI * freq;
         let k = w * w;
-        let c = 2.0 * ZETA * w;
+        let c = 2.0 * zeta * w;
         let mut left = dt;
         while left > 1e-6 {
             let h = left.min(MAX_STEP);
@@ -126,6 +139,49 @@ mod tests {
         s.set_target(100.0);
         s.step(10.0);
         assert!(s.pos.is_finite() && s.pos.abs() < 1000.0);
+    }
+
+    #[test]
+    fn closing_is_faster_and_never_undershoots() {
+        // time (s) until the height is within 1 px of its target, and the lowest value reached
+        fn close(freq: f32, zeta: f32) -> (f32, f32) {
+            let mut s = Spring::new(456.0);
+            s.set_target(34.0);
+            let (mut t, mut min, mut within) = (0.0f32, f32::MAX, None);
+            while t < 2.0 {
+                s.step_with(1.0 / 60.0, freq, zeta);
+                t += 1.0 / 60.0;
+                min = min.min(s.pos);
+                if within.is_none() && (s.pos - 34.0).abs() < 1.0 {
+                    within = Some(t);
+                }
+            }
+            (within.unwrap_or(f32::MAX), min)
+        }
+        let (t_open_spring, _) = close(FREQ, ZETA);
+        let (t_close, min) = close(CLOSE_FREQ, CLOSE_ZETA);
+        assert!(min >= 34.0 - 0.01, "closing must not bounce below the pill's size: {min}");
+        assert!(t_close < 0.22, "close took {t_close}s");
+        assert!(t_close < t_open_spring * 0.7, "close {t_close}s vs open spring {t_open_spring}s");
+    }
+
+    #[test]
+    fn switching_springs_mid_flight_is_continuous() {
+        let mut s = Spring::new(34.0);
+        s.set_target(456.0);
+        for _ in 0..8 {
+            s.step(1.0 / 60.0); // opening...
+        }
+        let (pos, vel) = (s.pos, s.vel);
+        s.set_target(34.0); // ...interrupted by a close
+        assert_eq!((s.pos, s.vel), (pos, vel), "retargeting must not touch position or velocity");
+        let mut min = f32::MAX;
+        for _ in 0..120 {
+            s.step_with(1.0 / 60.0, CLOSE_FREQ, CLOSE_ZETA);
+            min = min.min(s.pos);
+        }
+        assert!(s.settled(), "pos={} vel={}", s.pos, s.vel);
+        assert!(min >= 34.0 - 0.01, "bounced below the pill's size: {min}");
     }
 
     #[test]

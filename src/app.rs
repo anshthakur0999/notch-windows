@@ -5,7 +5,7 @@
 //! (never one big `RefCell<App>`) because Win32 calls made from inside a handler can
 //! synchronously re-enter the window procedure.
 
-use crate::anim::Spring;
+use crate::anim::{self, Spring};
 use crate::clipboard::{self, Formats};
 use crate::notes::Notes;
 use crate::render::{self, Renderer};
@@ -316,8 +316,10 @@ impl App {
 
         let mut w = self.w.get();
         let mut h = self.h.get();
-        w.step(dt);
-        h.step(dt);
+        // opening has the springy overshoot; closing is stiffer and snaps shut
+        let (freq, zeta) = if self.open.get() { (anim::FREQ, anim::ZETA) } else { (anim::CLOSE_FREQ, anim::CLOSE_ZETA) };
+        w.step_with(dt, freq, zeta);
+        h.step_with(dt, freq, zeta);
         let done = w.settled() && h.settled();
         if done {
             w.snap();

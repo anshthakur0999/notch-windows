@@ -68,7 +68,7 @@ Optional file: `%APPDATA%\Notch\settings.json` (all keys optional; restart to ap
   "hotkey_clipboard": "Win+Alt+V",
   "hotkey_visibility": "Win+Alt+H",
   "hover_dwell_ms": 120,
-  "collapse_delay_ms": 300,
+  "collapse_delay_ms": 100,
   "max_items": 200,
   "max_image_mb": 200,
   "paste_on_click": true,

@@ -39,7 +39,7 @@ impl Default for Settings {
             hotkey_clipboard: "Win+Alt+V".into(),
             hotkey_visibility: "Win+Alt+H".into(),
             hover_dwell_ms: 120,
-            collapse_delay_ms: 300,
+            collapse_delay_ms: 100,
             max_items: 200,
             max_image_mb: 200,
             paste_on_click: true,
@@ -156,7 +156,7 @@ mod tests {
         let s = Settings::load(&p);
         assert_eq!(s.max_items, 10); // clamped up
         assert_eq!(s.hover_dwell_ms, 250);
-        assert_eq!(s.collapse_delay_ms, 300); // default
+        assert_eq!(s.collapse_delay_ms, 100); // default
         let _ = std::fs::remove_dir_all(&dir);
     }
 
