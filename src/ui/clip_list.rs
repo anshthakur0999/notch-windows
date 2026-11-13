@@ -1,4 +1,6 @@
-//! Clipboard tab: search field, PINNED / RECENT sections, typed rows, key-hint footer.
+//! Clipboard tab: search field, PINNED / RECENT sections and typed rows, with a "Capture paused"
+//! note in the header while capture is off. It is driven with the mouse or trackpad (click to
+//! paste, hover for pin and delete); only typing in the search box uses the keyboard.
 
 use super::*;
 use crate::render::{F, Renderer, color};
@@ -64,7 +66,8 @@ fn row_rect(y: f32, scroll: f32) -> RectF {
     RectF { l: p.l + 6.0, t: top, r: p.r - 6.0, b: top + ROW_H - 1.0 }
 }
 
-/// Keeps the keyboard selection visible; returns the new scroll offset.
+/// Scrolls just enough to bring row `k` into view (an entry that was pinned or unpinned moves to
+/// the other section); returns the new scroll offset.
 pub fn scroll_to_row(l: &ListLayout, k: usize, scroll: f32) -> f32 {
     let Some(&(_, y)) = l.rows.get(k) else { return scroll };
     let mut s = scroll;
@@ -129,7 +132,9 @@ pub fn draw(r: &mut Renderer, v: &View, alpha: f32) {
     }
     r.pop_clip();
 
-    draw_footer(r, alpha, v.paused);
+    if v.paused {
+        draw_paused(r, alpha);
+    }
 }
 
 fn draw_search(r: &Renderer, v: &View, alpha: f32) {
@@ -211,11 +216,8 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
     }
 
     // ---- title + subtitle ----
-    let keycap_w = if selected && v.kb_mode { pill::keycap_width(r, "Enter") } else { 0.0 };
     let right_limit = rect.r
-        - if selected && v.kb_mode {
-            keycap_w + 22.0
-        } else if hovered {
+        - if hovered {
             PIN_ZONE + 4.0
         } else if item.pinned {
             34.0
@@ -237,9 +239,7 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
     r.text(&subtitle, F::RowSub, sub_r.d2d(), color(pal.subtle, alpha));
 
     // ---- trailing controls ----
-    if selected && v.kb_mode {
-        pill::keycap(r, "Enter", rect.r - 10.0 - keycap_w, cy, alpha);
-    } else if hovered {
+    if hovered {
         let pin_hover = v.hover == Hit::RowPin(k);
         let pin_c = if item.pinned { pal.pin } else if pin_hover { pal.text } else { pal.subtle };
         r.pin(rect.r - 51.0, cy, 14.0, color(pin_c, alpha), item.pinned);
@@ -250,34 +250,18 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
     }
 }
 
-fn draw_footer(r: &Renderer, alpha: f32, paused: bool) {
-    let p = exp();
-    let pal = r.pal;
-    pill::hline(r, p.t + FOOTER_SEP, alpha);
-    let cy = p.t + FOOTER_CY;
-    if paused {
-        // shown at the right edge, in the space after the key hints
-        let label = "Capture paused";
-        let w = r.text_w(F::Hint, label);
-        r.text(
-            label,
-            F::Hint,
-            RectF { l: p.r - 18.0 - w, t: cy - 9.0, r: p.r - 14.0, b: cy + 9.0 }.d2d(),
-            color(pal.pin, alpha),
-        );
-    }
-    let mut x = p.l + 19.5;
-    for (keys, label) in [("\u{2191} \u{2193}", "move"), ("Enter", "paste"), ("Ctrl P", "pin"), ("Del", "remove")] {
-        let right = pill::keycap(r, keys, x, cy, alpha);
-        let lw = r.text_w(F::Hint, label);
-        r.text(
-            label,
-            F::Hint,
-            RectF { l: right + 6.0, t: cy - 9.0, r: right + 6.0 + lw + 4.0, b: cy + 9.0 }.d2d(),
-            color(pal.muted, alpha),
-        );
-        x = right + 6.0 + lw + 14.0;
-    }
+/// "Capture paused" in the header's free space, between the tab switch and the pin button (it
+/// used to sit in the footer). Amber, like the pin: that colour means "held" here.
+fn draw_paused(r: &Renderer, alpha: f32) {
+    let label = "Capture paused";
+    let w = r.text_w(F::Hint, label);
+    let (cy, right) = (seg_bg().cy(), btn_pin().l - 8.0);
+    r.text(
+        label,
+        F::Hint,
+        RectF { l: right - w - 4.0, t: cy - 9.0, r: right, b: cy + 9.0 }.d2d(),
+        color(r.pal.pin, alpha),
+    );
 }
 
 #[cfg(test)]

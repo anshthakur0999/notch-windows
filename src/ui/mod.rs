@@ -29,7 +29,8 @@ pub const PEEK_H: f32 = 46.0;
 pub const PEEK_MIN_W: f32 = COLLAPSED_W + 24.0;
 pub const PEEK_MAX_W: f32 = 340.0;
 
-/// Footer separator line and the vertical centre of footer content (offsets from pill top).
+/// The notepad's footer separator line and the vertical centre of its content (offsets from the
+/// pill top). The clipboard tab has no footer: its list runs down to `LIST_BOTTOM`.
 pub const FOOTER_SEP: f32 = 414.0;
 pub const FOOTER_CY: f32 = 434.0;
 
@@ -130,14 +131,17 @@ pub fn btn_collapse() -> RectF {
 pub fn search_rect() -> RectF {
     at(9.3, 53.5, 421.4, 37.4)
 }
+/// Where the scrolling list is cut off at the bottom (offset from the pill top). Far enough above
+/// the pill's rounded bottom corners that a highlighted row never pokes out past them.
+pub const LIST_BOTTOM: f32 = EXPANDED_H - 12.0;
 /// Region the scrolling list is clipped to.
 pub fn list_viewport() -> RectF {
-    at(0.0, 94.0, EXPANDED_W, FOOTER_SEP - 1.0 - 94.0)
+    at(0.0, 94.0, EXPANDED_W, LIST_BOTTOM - 94.0)
 }
 /// Offset of the list's first entry from the top of the pill.
 pub const LIST_TOP: f32 = 97.0;
 /// Visible height available to list content.
-pub const LIST_VIEW_H: f32 = FOOTER_SEP - 3.0 - LIST_TOP;
+pub const LIST_VIEW_H: f32 = LIST_BOTTOM - 2.0 - LIST_TOP;
 
 // ---- notes tab ----
 /// Where the native notepad window sits.
@@ -198,10 +202,8 @@ pub struct View<'a> {
     pub h: f32,
     pub tab: Tab,
     pub hover: Hit,
-    /// Highlighted clipboard row (mouse hover or keyboard selection), by list position.
+    /// Highlighted clipboard row (the one under the pointer), by list position.
     pub sel: Option<usize>,
-    /// True when the highlight came from the keyboard (shows the Enter hint).
-    pub kb_mode: bool,
     pub scroll: f32,
     pub items: &'a [ClipItem],
     pub store: &'a Store,
@@ -225,5 +227,7 @@ pub struct View<'a> {
 /// What the renderer needs to draw the copy-peek capsule this frame.
 pub struct PeekView<'a> {
     pub content: &'a crate::peek::Content,
+    /// What the capsule showed before the last copy, while it cross-fades out.
+    pub prev: Option<&'a crate::peek::Content>,
     pub look: crate::peek::Look,
 }

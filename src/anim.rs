@@ -20,6 +20,12 @@ pub const ZETA: f32 = 0.78;
 pub const CLOSE_FREQ: f32 = 7.0;
 pub const CLOSE_ZETA: f32 = 1.0;
 
+/// The copy-peek capsule going back to the resting pill. Also critically damped (it must not dip
+/// below the resting size), but softer than closing the panel: with `CLOSE_FREQ` the capsule
+/// jumped ~25 px in its first frame and was shut in 8 frames, which read as a snap.
+pub const PEEK_OUT_FREQ: f32 = 4.0;
+pub const PEEK_OUT_ZETA: f32 = 1.0;
+
 const MAX_STEP: f32 = 1.0 / 240.0;
 
 impl Spring {
@@ -163,6 +169,37 @@ mod tests {
         assert!(min >= 34.0 - 0.01, "closing must not bounce below the pill's size: {min}");
         assert!(t_close < 0.22, "close took {t_close}s");
         assert!(t_close < t_open_spring * 0.7, "close {t_close}s vs open spring {t_open_spring}s");
+    }
+
+    #[test]
+    fn the_peek_leaves_gently_but_still_briskly() {
+        // the capsule's widest case: 340 -> 148, one 60 Hz frame at a time
+        fn leave(freq: f32, zeta: f32) -> (f32, f32, f32) {
+            let mut s = Spring::new(340.0);
+            s.set_target(148.0);
+            let (mut t, mut min, mut first, mut done) = (0.0f32, f32::MAX, 0.0f32, None);
+            let mut prev = s.pos;
+            while t < 1.5 {
+                s.step_with(1.0 / 60.0, freq, zeta);
+                t += 1.0 / 60.0;
+                if first == 0.0 {
+                    first = prev - s.pos;
+                }
+                min = min.min(s.pos);
+                if done.is_none() && (s.pos - 148.0).abs() < 2.0 {
+                    done = Some(t);
+                }
+                prev = s.pos;
+            }
+            (first, min, done.unwrap_or(f32::MAX))
+        }
+        let (first_close, _, t_close) = leave(CLOSE_FREQ, CLOSE_ZETA);
+        let (first, min, t) = leave(PEEK_OUT_FREQ, PEEK_OUT_ZETA);
+        assert!(min >= 148.0 - 0.01, "must not dip below the resting width: {min}");
+        assert!(first < first_close * 0.6, "first frame moved {first:.1}px vs {first_close:.1}px when closing");
+        assert!(first / 192.0 < 0.10, "first frame covered {:.0}% of the way", first / 1.92);
+        assert!(t > t_close, "softer than the panel's close ({t}s vs {t_close}s)");
+        assert!(t < 0.30, "still brisk: {t}s");
     }
 
     #[test]

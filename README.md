@@ -14,7 +14,7 @@ almost nothing while idle.
 | --- | --- |
 | Open | Hover the pill (it expands after a short dwell), click it, or press a hotkey |
 | Notepad (toggle) | `Win+Alt+N` — opens the notepad with the cursor in it; press again or `Esc` to close |
-| Clipboard | `Win+Alt+V` — newest entry pre-selected |
+| Clipboard | `Win+Alt+V` — opens the clipboard list with the search box ready (just start typing) |
 | Switch tab | Click **Notepad** / **Clipboard** in the header, or press `Tab` |
 | Keep open | The pin in the header: the pill stays open until you unpin it, press `Esc`, or click the chevron |
 | Close | Move the mouse away, `Esc`, the chevron, or click another app |
@@ -41,12 +41,14 @@ nothing to edit and no restart:
 ### Copy peek
 
 Each time you copy, the collapsed pill widens into a capsule that says **Copied** and shows what
-it was, then shrinks back: the check badge leads, the text fades in as the spring settles, it holds
-for about 2 s, then the text fades out before the width springs back.
+it was, then shrinks back. The badge pops in and its check mark draws itself, then "Copied" and
+the preview slide out from behind it. It holds for about 2 s, then eases back: the text fades
+while the capsule is already closing, so there is no pause before it goes.
 
 * Short text shows in full; long text is cut with an ellipsis (it never wraps). An image shows a
   small thumbnail and its size (`Image · 1280 × 720`).
-* Copying again while it is up swaps the content and holds again, without replaying the widen.
+* Copying again while it is up cross-fades to the new content (the old preview drops out, the new
+  one fades in as the width adjusts) and holds again, without replaying the widen.
   It stays up while the cursor is on it. Click it to open the pill.
 * No peek when it would only be noise: the panel is already open, the pill is hidden or a
   full-screen app is in front, capture is paused, or the copy is one Notch ignores (password
@@ -98,8 +100,9 @@ across restarts. If Notch isn't running, the commands just tell you so.
   `Esc` clears the search, the second closes the pill.
 * Entries are grouped into **PINNED** and **RECENT**, labelled Text / Link / Code / Image with how
   long ago they were copied.
-* `↑` `↓` move, `Enter` pastes into the app you were in, `Shift+Enter` only copies, `Ctrl+P` pins,
-  `Del` removes. With the mouse: click a row to paste; hover it for the pin and ✕ buttons.
+* The list is driven with the mouse or trackpad. Click an entry to paste it into the app you were
+  in (hold `Shift` while clicking to only copy it); hover it for the pin and ✕ buttons; scroll with
+  the wheel or a two-finger swipe.
 * Pinned entries never expire. Anything a password manager flags as secret
   (`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory = 0`) is never
   recorded, and Notch ignores changes it makes itself.

@@ -121,10 +121,8 @@ pub struct App {
     /// After an explicit close with the cursor still on the pill, don't instantly re-open.
     hover_lock: Cell<bool>,
     hover: Cell<Hit>,
-    /// Highlighted clipboard row (by position in the filtered list).
+    /// Highlighted clipboard row (by position in the filtered list): the one under the pointer.
     sel: Cell<Option<usize>>,
-    /// The highlight was set by the keyboard (shows the Enter hint, hides hover buttons).
-    kb_mode: Cell<bool>,
     mouse: Cell<(f32, f32)>,
     scroll: Cell<f32>,
     prev_fg: Cell<HWND>,
@@ -198,7 +196,6 @@ impl App {
             hover_lock: Cell::new(false),
             hover: Cell::new(Hit::None),
             sel: Cell::new(None),
-            kb_mode: Cell::new(false),
             mouse: Cell::new((0.0, 0.0)),
             scroll: Cell::new(0.0),
             prev_fg: Cell::new(HWND::default()),
@@ -393,10 +390,19 @@ impl App {
 
         let mut w = self.w.get();
         let mut h = self.h.get();
-        // opening (and the copy peek widening) has the springy overshoot; closing is stiffer and
-        // snaps shut
-        let growing = self.open.get() || self.peek.borrow().as_ref().is_some_and(Peek::growing);
-        let (freq, zeta) = if growing { (anim::FREQ, anim::ZETA) } else { (anim::CLOSE_FREQ, anim::CLOSE_ZETA) };
+        // Opening (and the copy peek widening) has the springy overshoot; closing the panel is stiffer
+        // and snaps shut; the copy peek easing back to the resting pill is in between.
+        let (growing, peek_leaving) = {
+            let p = self.peek.borrow();
+            (self.open.get() || p.as_ref().is_some_and(Peek::growing), p.is_some())
+        };
+        let (freq, zeta) = if growing {
+            (anim::FREQ, anim::ZETA)
+        } else if peek_leaving {
+            (anim::PEEK_OUT_FREQ, anim::PEEK_OUT_ZETA)
+        } else {
+            (anim::CLOSE_FREQ, anim::CLOSE_ZETA)
+        };
         w.step_with(dt, freq, zeta);
         h.step_with(dt, freq, zeta);
         // a fade the springs do not drive (the peek's text going out) also keeps the loop alive
@@ -415,10 +421,11 @@ impl App {
         let t2 = Instant::now();
         if crate::log_enabled() {
             crate::log(&format!(
-                "frame dt={:.1}ms region={:.2}ms render+present={:.2}ms h={:.0}",
+                "frame dt={:.1}ms region={:.2}ms render+present={:.2}ms w={:.1} h={:.1}",
                 dt * 1000.0,
                 (t1 - t0).as_secs_f32() * 1000.0,
                 (t2 - t1).as_secs_f32() * 1000.0,
+                w.pos,
                 h.pos
             ));
         }
@@ -497,8 +504,9 @@ impl App {
         {
             let mut slot = self.peek.borrow_mut();
             match slot.as_mut() {
-                // another copy while the capsule is up: swap the content, hold again, no replay
-                Some(p) => p.swap(content),
+                // another copy while the capsule is up: cross-fade to the new content, hold again,
+                // no replay
+                Some(p) => p.swap(content, now),
                 None => *slot = Some(Peek::new(content, reduced, now)),
             }
         }
@@ -530,17 +538,24 @@ impl App {
             }
             return;
         }
-        if let Some(p) = self.peek.borrow_mut().as_mut() {
+        let reduced = {
+            let mut slot = self.peek.borrow_mut();
+            let Some(p) = slot.as_mut() else { return };
             p.begin_leave(Instant::now());
+            p.reduced
+        };
+        if reduced {
+            self.start_anim(); // the fade-out needs the frame loop; the size does not move
+        } else {
+            // the width starts easing back at once, while the text is still fading out
+            self.set_targets(COLLAPSED_W, COLLAPSED_H);
         }
-        self.start_anim(); // the text fade needs the frame loop
     }
 
-    /// Per frame: move the peek on from the text fade to the shrink.
+    /// Per frame: reduced motion only, drop the peek once it has faded out.
     fn peek_advance(&self, now: Instant) {
         let step = self.peek.borrow_mut().as_mut().map(|p| p.advance(now));
         match step {
-            Some(Advance::Shrink) => self.set_targets(COLLAPSED_W, COLLAPSED_H),
             Some(Advance::Finished) => {
                 // reduced motion: the capsule has faded out; go straight back to the resting size
                 *self.peek.borrow_mut() = None;
@@ -590,14 +605,17 @@ impl App {
             let peek = self.peek.borrow();
             let (Some(list), Some(tabs)) = (list.as_ref(), tabs.as_ref()) else { return };
             let (w, h) = self.size();
-            let peek_view = peek.as_ref().map(|p| PeekView { content: &p.content, look: p.look(w, Instant::now()) });
+            let peek_view = peek.as_ref().map(|p| PeekView {
+                content: &p.content,
+                prev: p.prev.as_ref(),
+                look: p.look(w, Instant::now()),
+            });
             let view = View {
                 w,
                 h,
                 tab: self.tab.get(),
                 hover: self.hover.get(),
                 sel: self.sel.get(),
-                kb_mode: self.kb_mode.get(),
                 scroll: self.scroll.get(),
                 items: store.items(),
                 store: &store,
@@ -734,11 +752,6 @@ impl App {
         }
         self.expand();
         self.sticky.set(true);
-        if self.tab.get() == Tab::Clipboard {
-            // keyboard-first: newest entry is pre-selected, Enter pastes it
-            self.kb_mode.set(true);
-            self.sel.set(if self.row_count() > 0 { Some(0) } else { None });
-        }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), T_COLLAPSE);
         }
@@ -970,8 +983,7 @@ impl App {
         if hit != self.hover.get() {
             self.hover.set(hit);
             if let Hit::Row(k) | Hit::RowPin(k) | Hit::RowDel(k) = hit {
-                self.sel.set(Some(k)); // mouse and keyboard share one highlighted row
-                self.kb_mode.set(false);
+                self.sel.set(Some(k));
             }
             self.invalidate();
         }
@@ -986,9 +998,7 @@ impl App {
         }
         if self.hover.get() != Hit::None {
             self.hover.set(Hit::None);
-            if !self.kb_mode.get() {
-                self.sel.set(None);
-            }
+            self.sel.set(None);
             self.invalidate();
         }
         if self.open.get() && self.auto_close_ok() {
@@ -1119,15 +1129,14 @@ impl App {
         self.hover.set(hit);
         if let Hit::Row(k) | Hit::RowPin(k) | Hit::RowDel(k) = hit {
             self.sel.set(Some(k));
-            self.kb_mode.set(false);
         }
         self.invalidate();
     }
 
     /// The list changed under a stationary pointer (a row was deleted, a new entry arrived):
     /// hit-test again at the last mouse position, so the hovered row and its pin/x buttons appear
-    /// at once instead of waiting for the next mouse move. While the keyboard is driving, rows
-    /// are not hovered (the selection shows instead); with the pointer outside the pill, nothing is.
+    /// at once instead of waiting for the next mouse move. With the pointer outside the pill,
+    /// nothing is hovered.
     fn refresh_hover(&self) {
         if !self.expanded() {
             return;
@@ -1145,51 +1154,23 @@ impl App {
         if self.tab.get() != Tab::Clipboard {
             return;
         }
+        self.hover.set(hit);
         if let Hit::Row(k) | Hit::RowPin(k) | Hit::RowDel(k) = hit {
-            if self.kb_mode.get() {
-                self.hover.set(Hit::None);
-            } else {
-                self.hover.set(hit);
-                self.sel.set(Some(k));
-            }
-        } else {
-            self.hover.set(hit);
+            self.sel.set(Some(k));
         }
         if crate::log_enabled() {
             crate::log(&format!("refresh_hover at ({x:.0},{y:.0}) -> {:?} sel={:?}", self.hover.get(), self.sel.get()));
         }
     }
 
-    /// Moves the keyboard selection in the clipboard list and keeps it scrolled into view.
-    fn move_selection(&self, delta: i32) {
-        if !self.expanded() || self.tab.get() != Tab::Clipboard {
-            return;
-        }
-        let n = self.row_count();
-        if n == 0 {
-            return;
-        }
-        let cur = self.sel.get().map(|i| i as i32).unwrap_or(if delta > 0 { -1 } else { n as i32 });
-        let next = (cur + delta).clamp(0, n as i32 - 1) as usize;
-        self.sel.set(Some(next));
-        self.kb_mode.set(true);
-        let scroll = {
-            let l = self.list.borrow();
-            l.as_ref().map(|l| clip_list::scroll_to_row(l, next, self.scroll.get())).unwrap_or(0.0)
-        };
-        self.scroll.set(scroll);
-        self.hover.set(Hit::None); // keyboard takes over from the mouse highlight
-        self.invalidate();
-    }
-
-    /// The search text changed: rebuild the list and select the first match.
+    /// The search text changed: rebuild the list from the top. Whatever is under the pointer gets
+    /// highlighted again.
     fn query_changed(&self) {
         self.invalidate_list();
         self.scroll.set(0.0);
         self.hover.set(Hit::None);
-        self.kb_mode.set(true);
-        let n = self.row_count();
-        self.sel.set(if n > 0 { Some(0) } else { None });
+        self.sel.set(None);
+        self.refresh_hover();
         self.invalidate();
     }
 
@@ -1227,8 +1208,9 @@ impl App {
         self.query_changed();
     }
 
+    /// Keys the pill itself handles: Esc and Tab. (The clipboard list is driven with the mouse or
+    /// trackpad; typing goes to the search box through `on_char`.)
     fn on_key(&self, vk: u32) {
-        let ctrl = key_down(VK_CONTROL);
         match VIRTUAL_KEY(vk as u16) {
             VK_ESCAPE => {
                 if self.tab.get() == Tab::Clipboard && !self.query.borrow().is_empty() {
@@ -1241,31 +1223,6 @@ impl App {
             VK_TAB => {
                 let next = if self.tab.get() == Tab::Notes { Tab::Clipboard } else { Tab::Notes };
                 self.set_tab(next);
-            }
-            VK_UP => self.move_selection(-1),
-            VK_DOWN => self.move_selection(1),
-            VK_PRIOR => self.move_selection(-5),
-            VK_NEXT => self.move_selection(5),
-            VK_RETURN => {
-                if self.expanded() && self.tab.get() == Tab::Clipboard {
-                    if let Some(k) = self.sel.get() {
-                        self.activate_row(k, key_down(VK_SHIFT));
-                    }
-                }
-            }
-            VK_DELETE => {
-                if self.expanded() && self.tab.get() == Tab::Clipboard {
-                    if let Some(k) = self.sel.get() {
-                        self.delete_row(k);
-                    }
-                }
-            }
-            VK_P if ctrl => {
-                if self.expanded() && self.tab.get() == Tab::Clipboard {
-                    if let Some(k) = self.sel.get() {
-                        self.toggle_pin_row(k);
-                    }
-                }
             }
             _ => {}
         }

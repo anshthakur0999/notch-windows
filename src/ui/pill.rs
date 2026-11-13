@@ -66,7 +66,8 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     // Body: pure black while collapsed on the dark theme (it reads as part of the screen bezel),
     // easing to the panel colour as it opens. Hairline border keeps it visible on any wallpaper.
     // The collapsed indicator (a faint dash) gives way to the peek's badge.
-    let dash_gone = peek.map_or(0.0, |p| p.look.icon);
+    // (and it only comes back once the text has gone too, so it never shows through "Copied")
+    let dash_gone = peek.map_or(0.0, |p| (p.look.icon + p.look.old_icon).max(p.look.label).max(p.look.line).min(1.0));
     draw_body(r, pill, rad, t, body_a, 1.0 - dash_gone);
 
     if let Some(p) = peek {
@@ -106,56 +107,92 @@ fn draw_body(r: &Renderer, pill: RectF, rad: f32, t: f32, alpha: f32, dash: f32)
 
 /// The copy-peek capsule's content: a check badge (or the image's thumbnail), "Copied", and what
 /// was copied. It is anchored to the capsule's left edge, so while the capsule widens the badge
-/// leads and the text is revealed behind it.
+/// leads and the text is revealed behind it. When a copy replaces another the old preview fades
+/// out as the new one fades in (`look.old_line` / `look.line`).
 fn draw_peek(r: &mut Renderer, v: &View, pill: RectF, pk: &PeekView) {
     let look = pk.look;
-    if look.icon < 0.01 {
+    if look.icon + look.old_icon < 0.01 {
         return;
     }
     let c = pk.content;
     let pal = r.pal;
     let label = "Copied";
     let label_w = r.text_w(F::Seg, label);
-    let lay = peek::layout(c.target_w, c.slack, label_w);
+    let new_lay = peek::layout(c.target_w, c.slack, label_w);
+    let old_lay = pk.prev.map(|o| peek::layout(o.target_w, o.slack, label_w));
+    // badge and label glide from where the previous content had them to where this one wants them
+    let lay = old_lay.map_or(new_lay, |o| peek::lerp_layout(o, new_lay, look.shift));
     let cy = pill.cy();
 
     // keep everything inside the capsule's rounded right end while it is still narrow
     r.push_clip(RectF { l: pill.l, t: pill.t, r: pill.r - 12.0, b: pill.b }.d2d());
 
-    let lead = RectF { l: pill.l + lay.lead_x, t: cy - peek::LEAD / 2.0, r: pill.l + lay.lead_x + peek::LEAD, b: cy + peek::LEAD / 2.0 };
-    match c.thumb {
+    let badge_x = pill.l + lay.lead_x + peek::LEAD / 2.0;
+    if let (Some(o), true) = (pk.prev, look.old_icon > 0.01) {
+        draw_badge(r, v, o.thumb, badge_x, cy, look.old_icon, 1.0, 1.0);
+    }
+    draw_badge(r, v, c.thumb, badge_x, cy, look.icon, look.pop, look.check);
+
+    // "Copied" and the preview slide out from behind the badge as they fade in
+    let dx = look.slide;
+    if look.label > 0.01 {
+        let label_r = RectF { l: pill.l + lay.label_x + dx, t: pill.t, r: pill.l + lay.label_x + dx + label_w + 2.0, b: pill.b };
+        r.text(label, F::Seg, label_r.d2d(), color(pal.text, look.label));
+    }
+    if let (Some(o), Some(ol)) = (pk.prev, old_lay) {
+        if !o.line.is_empty() && look.old_line > 0.01 {
+            let text_r = RectF { l: pill.l + ol.text_x, t: pill.t, r: pill.l + ol.text_x + ol.text_w, b: pill.b };
+            r.text(&o.line, F::Tab, text_r.d2d(), color(pal.text2, look.old_line));
+        }
+    }
+    if !c.line.is_empty() && look.line > 0.01 {
+        let text_r = RectF { l: pill.l + lay.text_x + dx, t: pill.t, r: pill.l + lay.text_x + dx + lay.text_w, b: pill.b };
+        r.text(&c.line, F::Tab, text_r.d2d(), color(pal.text2, look.line));
+    }
+    r.pop_clip();
+}
+
+/// The capsule's leading badge centred on (`cx`, `cy`): an accent disc whose check mark draws
+/// itself (`check` is how much of it is drawn), or the copied image as a circle. `pop` scales it.
+#[allow(clippy::too_many_arguments)]
+fn draw_badge(r: &mut Renderer, v: &View, thumb: Option<u64>, cx: f32, cy: f32, alpha: f32, pop: f32, check: f32) {
+    // below this the disc is a barely-there ghost over the returning dash: skip it
+    if alpha < 0.04 {
+        return;
+    }
+    let pal = r.pal;
+    let rad = 17.0 * pop;
+    match thumb {
         Some(id) => match r.thumb(id, &v.store.thumb_path(id)) {
             Some(bmp) => {
                 // A circle, the same size as the check badge: the picture fills it (cropped to the
                 // centre), with a faint rim so a dark screenshot does not vanish into the capsule.
-                let disc = RectF { l: lead.cx() - 17.0, t: cy - 17.0, r: lead.cx() + 17.0, b: cy + 17.0 };
-                r.fill_rrect_cover(&bmp, disc.d2d(), 17.0, look.icon);
-                r.stroke_rrect(disc.inset(0.5).d2d(), 16.5, color(pal.wash, 0.14 * look.icon), 1.0);
+                let disc = RectF { l: cx - rad, t: cy - rad, r: cx + rad, b: cy + rad };
+                r.fill_rrect_cover(&bmp, disc.d2d(), rad, alpha);
+                r.stroke_rrect(disc.inset(0.5).d2d(), (rad - 0.5).max(0.0), color(pal.wash, 0.14 * alpha), 1.0);
             }
             None => {
-                r.fill_circle(lead.cx(), cy, 17.0, color(pal.tile, look.icon));
-                r.glyph('\u{E91B}', F::Icon16, lead.cx(), cy, color(pal.muted, look.icon));
+                r.fill_circle(cx, cy, rad, color(pal.tile, alpha));
+                r.glyph('\u{E91B}', F::Icon16, cx, cy, color(pal.muted, alpha));
             }
         },
         None => {
-            // accent-coloured badge with a check mark
-            r.fill_circle(lead.cx(), cy, 17.0, color(pal.clip, look.icon));
-            let (x, y) = (lead.cx(), cy);
-            let ink = color(pal.ink, look.icon);
-            r.line(x - 5.4, y + 0.4, x - 1.6, y + 4.0, ink, 2.2);
-            r.line(x - 1.6, y + 4.0, x + 5.6, y - 3.6, ink, 2.2);
+            r.fill_circle(cx, cy, rad, color(pal.clip, alpha));
+            // The check is two strokes (the short leg, then the long one); each is drawn as far as
+            // `check` has got, in proportion to its length (about 1 : 2).
+            let ink = color(pal.ink, alpha);
+            let at = |dx: f32, dy: f32| (cx + dx * pop, cy + dy * pop);
+            let (a, b, c) = (at(-5.4, 0.4), at(-1.6, 4.0), at(5.6, -3.6));
+            let (f1, f2) = ((check / 0.33).clamp(0.0, 1.0), ((check - 0.33) / 0.67).clamp(0.0, 1.0));
+            let w = 2.2 * pop;
+            if f1 > 0.0 {
+                r.line(a.0, a.1, a.0 + (b.0 - a.0) * f1, a.1 + (b.1 - a.1) * f1, ink, w);
+            }
+            if f2 > 0.0 {
+                r.line(b.0, b.1, b.0 + (c.0 - b.0) * f2, b.1 + (c.1 - b.1) * f2, ink, w);
+            }
         }
     }
-
-    if look.text > 0.01 {
-        let label_r = RectF { l: pill.l + lay.label_x, t: pill.t, r: pill.l + lay.label_x + label_w + 2.0, b: pill.b };
-        r.text(label, F::Seg, label_r.d2d(), color(pal.text, look.text));
-        if !c.line.is_empty() {
-            let text_r = RectF { l: pill.l + lay.text_x, t: pill.t, r: pill.l + lay.text_x + lay.text_w, b: pill.b };
-            r.text(&c.line, F::Tab, text_r.d2d(), color(pal.text2, look.text));
-        }
-    }
-    r.pop_clip();
 }
 
 fn draw_header(r: &Renderer, v: &View, alpha: f32) {
