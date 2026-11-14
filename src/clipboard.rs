@@ -8,6 +8,7 @@ use crate::app::{App, WM_APP_CLIPDONE};
 use crate::peek::Copied;
 use crate::store::{ClipItem, Kind, Sub, classify, hash64, make_preview, now_secs, write_atomic};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
@@ -196,15 +197,17 @@ fn spawn_image(app: &App, data: Vec<u8>, is_png: bool) {
     let job = ImageJob { hwnd: app.hwnd.0 as isize, id, img, thumb, data, is_png };
     let _ = std::thread::Builder::new().name("notch-image".into()).spawn(move || {
         let done = run_job(&job);
-        let b = Box::into_raw(Box::new(done));
+        DONE.lock().unwrap_or_else(|e| e.into_inner()).push(done);
         unsafe {
             let h = HWND(job.hwnd as *mut core::ffi::c_void);
-            if PostMessageW(Some(h), WM_APP_CLIPDONE, WPARAM(0), LPARAM(b as isize)).is_err() {
-                drop(Box::from_raw(b)); // window is gone
-            }
+            let _ = PostMessageW(Some(h), WM_APP_CLIPDONE, WPARAM(0), LPARAM(0));
         }
     });
 }
+
+/// Finished image jobs waiting for the UI thread. The message that announces them carries no
+/// data, so a stray `WM_APP_CLIPDONE` from another program just finds the queue empty.
+static DONE: Mutex<Vec<ImageDone>> = Mutex::new(Vec::new());
 
 fn run_job(job: &ImageJob) -> ImageDone {
     unsafe {
@@ -337,9 +340,15 @@ unsafe fn save_png(wic: &IWICImagingFactory, src: &IWICBitmapSource, path: &Path
     }
 }
 
-/// `WM_APP_CLIPDONE`: the worker finished; take ownership of the result.
-pub fn on_image_done(app: &App, lp: LPARAM) {
-    let done = unsafe { Box::from_raw(lp.0 as *mut ImageDone) };
+/// `WM_APP_CLIPDONE`: a worker finished; handle every result that is waiting.
+pub fn on_image_done(app: &App) {
+    let finished = std::mem::take(&mut *DONE.lock().unwrap_or_else(|e| e.into_inner()));
+    for done in finished {
+        finish_image(app, done);
+    }
+}
+
+fn finish_image(app: &App, done: ImageDone) {
     let shown_id;
     {
         let mut store = app.store.borrow_mut();

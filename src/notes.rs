@@ -86,6 +86,23 @@ pub fn note_path(dir: &Path, id: u64) -> PathBuf {
     dir.join("notes").join(format!("{id}.txt"))
 }
 
+/// Reads a note. A file that is not valid UTF-8 (edited elsewhere, saved as ANSI or UTF-16) is
+/// copied to `<id>.bad` first and shown with the bad bytes replaced, so the original survives
+/// the next save. A missing file is an empty note.
+fn read_note(path: &Path) -> String {
+    let Ok(bytes) = std::fs::read(path) else { return String::new() };
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => {
+            let bad = path.with_extension("bad");
+            if !bad.exists() {
+                let _ = std::fs::copy(path, bad);
+            }
+            String::from_utf8_lossy(e.as_bytes()).into_owned()
+        }
+    }
+}
+
 impl Meta {
     fn fresh() -> Meta {
         // id 1 is taken by the first note, so the next free id is 2
@@ -238,7 +255,10 @@ impl Notes {
                 return;
             }
         }
-        self.flush();
+        // If the edits could not be written, stay on this note: reloading would throw them away.
+        if !self.flush() {
+            return;
+        }
         {
             let mut m = self.meta.borrow_mut();
             m.active = i;
@@ -247,12 +267,12 @@ impl Notes {
         self.reload();
     }
 
-    /// Creates and switches to a new empty note. Returns false if the limit is reached.
+    /// Creates and switches to a new empty note. Returns false if the limit is reached, or if
+    /// the current note could not be saved first.
     pub fn add(&self) -> bool {
-        if self.count() >= MAX_NOTES {
+        if self.count() >= MAX_NOTES || !self.flush() {
             return false;
         }
-        self.flush();
         {
             let mut m = self.meta.borrow_mut();
             m.add();
@@ -310,17 +330,32 @@ impl Notes {
         self.created() && unsafe { GetFocus() == self.hwnd.get() }
     }
 
+    /// Creates the (hidden) edit control now if it does not exist yet, so the first time the
+    /// notepad is shown nothing has to be built in the middle of the opening animation.
+    pub fn prepare(&self, owner: HWND) {
+        let _ = self.ensure(owner);
+    }
+
     /// Creates the edit control on first use and loads the active note.
     fn ensure(&self, owner: HWND) -> bool {
         if self.created() {
             return true;
         }
+        let started = std::time::Instant::now();
+        let ok = self.create_editor(owner);
+        crate::log(&format!("notepad editor created in {:.1} ms", started.elapsed().as_secs_f32() * 1000.0));
+        ok
+    }
+
+    fn create_editor(&self, owner: HWND) -> bool {
         unsafe {
             let Some(h) = make_richedit(owner, WS_VSCROLL | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL) as u32)) else {
                 return false;
             };
             self.hwnd.set(h);
             send(h, EM_SETTEXTMODE, TM_PLAINTEXT.0 as usize, 0);
+            // The default limit is 32,767 characters: longer pastes and typing are dropped silently.
+            send(h, EM_EXLIMITTEXT, 0, 0x7FFF_FFFE);
             style_note(h, &self.style.get());
             apply_line_spacing(h);
             self.load_text_into(h);
@@ -333,7 +368,7 @@ impl Notes {
 
     unsafe fn load_text_into(&self, h: HWND) {
         unsafe {
-            let text = std::fs::read_to_string(self.active_path()).unwrap_or_default();
+            let text = read_note(&self.active_path());
             let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\n', "\r\n");
             let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
             let mask = send(h, EM_GETEVENTMASK, 0, 0).0;
@@ -388,10 +423,11 @@ impl Notes {
         self.dirty.set(true);
     }
 
-    /// Writes the active note to disk if it changed (atomic replace).
-    pub fn flush(&self) {
+    /// Writes the active note to disk if it changed (atomic replace). Returns false if the text
+    /// is still unsaved because the write failed.
+    pub fn flush(&self) -> bool {
         if !self.dirty.get() || !self.created() {
-            return;
+            return true;
         }
         unsafe {
             let h = self.hwnd.get();
@@ -400,9 +436,13 @@ impl Notes {
             let n = GetWindowTextW(h, &mut buf);
             let text = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
             let text = text.replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n");
-            if write_atomic(&self.active_path(), text.as_bytes()).is_ok() {
+            let ok = write_atomic(&self.active_path(), text.as_bytes()).is_ok();
+            if ok {
                 self.dirty.set(false);
+            } else {
+                crate::log("could not save the note; keeping it in the editor");
             }
+            ok
         }
     }
 
@@ -770,6 +810,50 @@ mod tests {
         assert!(m2.next_id > 2);
         std::fs::write(d.join("notes.json"), r#"{"next_id":3,"active":99,"notes":[{"id":1,"name":"A"}]}"#).unwrap();
         assert_eq!(Meta::load(&d).active, 0);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_note_that_is_not_utf8_is_backed_up_before_it_can_be_overwritten() {
+        let d = tmp("ansi");
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        let p = note_path(&d, 1);
+        std::fs::write(&p, b"caf\xE9 au lait").unwrap(); // "café" saved as Windows-1252
+        let text = read_note(&p);
+        assert!(text.starts_with("caf") && text.ends_with(" au lait"), "{text:?}");
+        assert_eq!(std::fs::read(p.with_extension("bad")).unwrap(), b"caf\xE9 au lait");
+        std::fs::write(&p, "plain utf-8 é").unwrap();
+        assert_eq!(read_note(&p), "plain utf-8 é");
+        assert_eq!(read_note(&note_path(&d, 9)), "", "a missing file is an empty note");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// These two need a real RichEdit control, so they create one (never shown).
+    #[test]
+    fn the_editor_takes_long_notes_and_a_failed_save_keeps_the_edits() {
+        let d = tmp("editor");
+        let n = Notes::new(d.clone());
+        assert!(n.ensure(HWND::default()));
+        const EM_GETLIMITTEXT: u32 = 0x00D5;
+        let limit = unsafe { send(n.hwnd(), EM_GETLIMITTEXT, 0, 0) }.0;
+        assert!(limit > 1_000_000, "the default 32,767-character limit is still in place: {limit}");
+
+        assert!(n.add()); // two notes; the new one (id 2) is active
+        let blocker = d.join("notes").join("2.tmp");
+        std::fs::create_dir(&blocker).unwrap(); // the temp file for note 2 can no longer be created
+        n.mark_dirty();
+        assert!(!n.flush());
+        n.select(0);
+        assert_eq!(n.active(), 1, "switching would have thrown the unsaved text away");
+        assert!(!n.add());
+        assert_eq!(n.count(), 2);
+
+        std::fs::remove_dir(&blocker).unwrap();
+        n.select(0);
+        assert_eq!(n.active(), 0, "once saving works again the switch goes through");
+        unsafe {
+            let _ = DestroyWindow(n.hwnd());
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }
