@@ -252,17 +252,7 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
         color(pal.muted, alpha),
     );
 
-    let label = "to collapse";
-    let lw = r.text_w(F::Hint, label);
-    let label_l = p.r - 20.0 - lw;
-    r.text(
-        label,
-        F::Hint,
-        RectF { l: label_l, t: cy - 9.0, r: label_l + lw + 4.0, b: cy + 9.0 }.d2d(),
-        color(pal.muted, alpha),
-    );
-    let key_w = pill::keycap_width(r, "Esc");
-    pill::keycap(r, "Esc", label_l - 7.0 - key_w, cy, alpha);
+    pill::collapse_hint(r, cy, alpha);
 }
 
 #[cfg(test)]

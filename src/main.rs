@@ -11,6 +11,7 @@ mod render;
 mod settings;
 mod shell;
 mod store;
+mod timer;
 mod ui;
 mod window;
 

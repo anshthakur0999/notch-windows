@@ -44,6 +44,10 @@ pub enum F {
     Row,
     RowSub,
     RowMono,
+    /// The timer: the big countdown, the small one (pill, header, capsules) and the time box.
+    Clock,
+    ClockSm,
+    Field,
 }
 
 pub struct Fonts {
@@ -55,6 +59,7 @@ pub struct Renderer {
     _dcomp: IDCompositionDevice,
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
+    d2d: ID2D1Factory1,
     pub dc: ID2D1DeviceContext,
     pub brush: ID2D1SolidColorBrush,
     dw: IDWriteFactory,
@@ -181,6 +186,7 @@ impl Renderer {
                 _dcomp: dcomp,
                 _target: target,
                 _visual: visual,
+                d2d,
                 dc,
                 brush,
                 dw,
@@ -384,6 +390,71 @@ impl Renderer {
                     l.GetMetrics(&mut m).ok().map(|_| m.widthIncludingTrailingWhitespace)
                 })
                 .unwrap_or(s.chars().count() as f32 * 7.0)
+        }
+    }
+
+    /// Width of a clock text such as "14:32" drawn by `clock_text`.
+    pub fn clock_width(&self, f: F, s: &str) -> f32 {
+        s.chars().map(|c| self.clock_cell(f, c)).sum()
+    }
+
+    /// Every digit gets a cell as wide as a "0", so the text does not jitter as the digits change.
+    fn clock_cell(&self, f: F, c: char) -> f32 {
+        self.text_w(f, if c.is_ascii_digit() { "0" } else { ":" })
+    }
+
+    /// A clock such as "14:32" or "1:24:58" with its left edge at `x`, centred on `cy`.
+    pub fn clock_text(&self, s: &str, f: F, x: f32, cy: f32, c: D2D1_COLOR_F) {
+        let mut x = x;
+        for ch in s.chars() {
+            let w = self.clock_cell(f, ch);
+            let rect = D2D_RECT_F { left: x, top: cy - 40.0, right: x + w, bottom: cy + 40.0 };
+            self.text(ch.encode_utf8(&mut [0u8; 4]), f, rect, c);
+            x += w;
+        }
+    }
+
+    /// A circle outline.
+    pub fn ring(&self, cx: f32, cy: f32, radius: f32, width: f32, c: D2D1_COLOR_F) {
+        unsafe {
+            self.brush.SetColor(&c);
+            self.dc.DrawEllipse(
+                &D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: radius, radiusY: radius },
+                &self.brush,
+                width,
+                None,
+            );
+        }
+    }
+
+    /// An arc of a circle with round ends, starting at 12 o'clock and running clockwise for
+    /// `sweep` degrees (a full turn is drawn as a plain ring). One path, so a translucent colour
+    /// does not double up where pieces would overlap. Built once a second at most: the timer ring.
+    pub fn arc(&self, cx: f32, cy: f32, radius: f32, width: f32, c: D2D1_COLOR_F, sweep: f32) {
+        if sweep <= 0.0 {
+            return;
+        }
+        if sweep >= 359.9 {
+            return self.ring(cx, cy, radius, width, c);
+        }
+        let a = sweep.to_radians();
+        unsafe {
+            let Ok(geom) = self.d2d.CreatePathGeometry() else { return };
+            let Ok(sink) = geom.Open() else { return };
+            sink.BeginFigure(Vector2 { X: cx, Y: cy - radius }, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: Vector2 { X: cx + radius * a.sin(), Y: cy - radius * a.cos() },
+                size: D2D_SIZE_F { width: radius, height: radius },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: if sweep > 180.0 { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+            });
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            if sink.Close().is_err() {
+                return;
+            }
+            self.brush.SetColor(&c);
+            self.dc.DrawGeometry(&geom, &self.brush, width, Some(&self.stroke));
         }
     }
 
@@ -598,6 +669,9 @@ fn make_fonts(dw: &IDWriteFactory, k: f32) -> Result<Fonts> {
         make_format(dw, ui, 14.0 * k, n, false)?,   // Row
         make_format(dw, ui, 11.5 * k, n, false)?,   // RowSub
         make_format(dw, mono, 11.0 * k, n, false)?, // RowMono
+        make_format(dw, ui, 46.0, sb, true)?,       // Clock
+        make_format(dw, ui, 12.5, sb, true)?,       // ClockSm
+        make_format(dw, ui, 32.0, sb, false)?,      // Field
     ];
     Ok(Fonts { v })
 }

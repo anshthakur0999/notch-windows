@@ -8,8 +8,10 @@ pub mod clip_list;
 pub mod notes_view;
 pub mod pill;
 pub mod theme;
+pub mod timer_view;
 
 use crate::store::{ClipItem, Store};
+use crate::timer::Phase;
 use clip_list::ListLayout;
 use notes_view::NoteTabs;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -28,6 +30,27 @@ pub const RADIUS_OPEN: f32 = 26.0;
 pub const PEEK_H: f32 = 46.0;
 pub const PEEK_MIN_W: f32 = COLLAPSED_W + 24.0;
 pub const PEEK_MAX_W: f32 = 340.0;
+/// Room the copy-peek capsule adds on its right for the running timer.
+pub const PEEK_TIMER_W: f32 = 96.0;
+
+/// The collapsed pill can widen into a capsule for the timer: `Hover` (cursor on it while a timer
+/// runs: notepad, pause/resume, time and clipboard buttons) and `TimesUp` (+5 min / Done).
+pub const HOVER_W: f32 = 216.0;
+pub const TIMES_UP_W: f32 = 300.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Capsule {
+    None,
+    Hover,
+    TimesUp,
+}
+
+/// Which box of the timer form takes the typing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TimerField {
+    Time,
+    Label,
+}
 
 /// The notepad's footer separator line and the vertical centre of its content (offsets from the
 /// pill top). The clipboard tab has no footer: its list runs down to `LIST_BOTTOM`.
@@ -38,6 +61,7 @@ pub const FOOTER_CY: f32 = 434.0;
 pub enum Tab {
     Notes,
     Clipboard,
+    Timer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,6 +83,24 @@ pub enum Hit {
     Row(usize),
     RowPin(usize),
     RowDel(usize),
+    TabTimer,
+    /// The "set a time" form: the two boxes, a preset chip, and Start.
+    TimerField,
+    TimerLabel,
+    TimerPreset(usize),
+    TimerStart,
+    /// While timing: stop (x), pause / resume, and "+1 min".
+    TimerStop,
+    TimerPause,
+    TimerPlus,
+    /// After the time ran out (panel or capsule): "Done" and "+5 min".
+    TimerDone,
+    TimerAdd5,
+    /// The hover capsule: notepad and clipboard buttons, pause / resume ring, and the time.
+    PeekNotes,
+    PeekClip,
+    PeekRing,
+    PeekTime,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,13 +154,17 @@ pub fn at(dx: f32, dy: f32, w: f32, h: f32) -> RectF {
 
 // ---- header ----
 pub fn seg_bg() -> RectF {
-    at(6.0, 6.0, 216.0, 44.0)
+    at(6.0, 6.0, 316.0, 44.0)
 }
 pub fn seg_notes() -> RectF {
     at(9.3, 9.3, 100.0, 37.4)
 }
 pub fn seg_clip() -> RectF {
     at(113.0, 9.3, 106.0, 37.4)
+}
+/// Wide enough for "1:24:58" next to the ring.
+pub fn seg_timer() -> RectF {
+    at(222.5, 9.3, 96.0, 37.4)
 }
 pub fn btn_pin() -> RectF {
     at(360.0, 13.0, 30.0, 30.0)
@@ -183,20 +229,30 @@ pub struct HitCtx<'a> {
     pub scroll: f32,
     pub list: &'a ListLayout,
     pub tabs: &'a NoteTabs,
+    pub timer: Phase,
+    pub capsule: Capsule,
 }
 
 pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
-    if !pill_rect(c.w, c.h).contains(x, y) {
+    let pill = pill_rect(c.w, c.h);
+    if !pill.contains(x, y) {
         return Hit::None;
     }
     if !c.expanded {
-        return Hit::Pill;
+        return match c.capsule {
+            Capsule::None => Hit::Pill,
+            Capsule::Hover => timer_view::hover_hit(pill, x, y),
+            Capsule::TimesUp => timer_view::times_up_hit(pill, x, y),
+        };
     }
     if seg_notes().contains(x, y) {
         return Hit::TabNotes;
     }
     if seg_clip().contains(x, y) {
         return Hit::TabClip;
+    }
+    if seg_timer().contains(x, y) {
+        return Hit::TabTimer;
     }
     if btn_pin().contains(x, y) {
         return Hit::BtnPin;
@@ -215,6 +271,11 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
         }
         Tab::Notes => {
             if let Some(hit) = c.tabs.hit(x, y) {
+                return hit;
+            }
+        }
+        Tab::Timer => {
+            if let Some(hit) = timer_view::hit(x, y, c.timer) {
                 return hit;
             }
         }
@@ -248,6 +309,33 @@ pub struct View<'a> {
     pub peek: Option<PeekView<'a>>,
     /// Unix seconds, for "2 min ago" labels.
     pub now: u64,
+    pub timer: TimerView<'a>,
+}
+
+/// What the timer's drawing needs this frame.
+pub struct TimerView<'a> {
+    pub phase: Phase,
+    /// Whole seconds left, and the fraction of the run left (the ring).
+    pub left: u64,
+    pub frac: f32,
+    /// The running timer's label, and the wall-clock time it ends ("10:31 pm").
+    pub label: &'a str,
+    pub ends: &'a str,
+    /// The form: what is typed in the two boxes, what the time box means, and which box has the caret.
+    pub input: &'a str,
+    pub label_input: &'a str,
+    pub parsed: Option<u64>,
+    pub focus: TimerField,
+    pub capsule: Capsule,
+    /// Width the copy-peek capsule reserved on its right for the timer (0 = none).
+    pub peek_slot: f32,
+}
+
+impl TimerView<'_> {
+    /// Running or paused: the pill shows the time left.
+    pub fn active(&self) -> bool {
+        matches!(self.phase, Phase::Running | Phase::Paused)
+    }
 }
 
 /// What the renderer needs to draw the copy-peek capsule this frame.

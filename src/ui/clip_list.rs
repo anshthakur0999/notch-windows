@@ -131,10 +131,6 @@ pub fn draw(r: &mut Renderer, v: &View, alpha: f32) {
         draw_row(r, v, k, idx, rect, alpha);
     }
     r.pop_clip();
-
-    if v.paused {
-        draw_paused(r, alpha);
-    }
 }
 
 fn draw_search(r: &Renderer, v: &View, alpha: f32) {
@@ -144,7 +140,8 @@ fn draw_search(r: &Renderer, v: &View, alpha: f32) {
     r.glyph('\u{E721}', F::Icon16, s.l + 22.0, s.cy(), color(pal.muted, alpha));
 
     let text_l = s.l + 41.0;
-    let text = RectF { l: text_l, t: s.t, r: s.r - 16.0, b: s.b };
+    let text_r = if v.paused { draw_paused(r, s, alpha) } else { s.r - 16.0 };
+    let text = RectF { l: text_l, t: s.t, r: text_r, b: s.b };
     if v.query.is_empty() {
         r.text("Search clipboard history", F::Title, text.d2d(), color(pal.subtle, alpha));
     } else {
@@ -250,18 +247,20 @@ fn draw_row(r: &mut Renderer, v: &View, k: usize, idx: usize, rect: RectF, alpha
     }
 }
 
-/// "Capture paused" in the header's free space, between the tab switch and the pin button (it
-/// used to sit in the footer). Amber, like the pin: that colour means "held" here.
-fn draw_paused(r: &Renderer, alpha: f32) {
+/// "Capture paused" at the right end of the search box (the header has no room left for it now
+/// that it holds three tabs). Amber, like the pin: that colour means "held" here. Returns the
+/// left edge of the label, so the typed text can stop short of it.
+fn draw_paused(r: &Renderer, field: RectF, alpha: f32) -> f32 {
     let label = "Capture paused";
     let w = r.text_w(F::Hint, label);
-    let (cy, right) = (seg_bg().cy(), btn_pin().l - 8.0);
+    let right = field.r - 16.0;
     r.text(
         label,
         F::Hint,
-        RectF { l: right - w - 4.0, t: cy - 9.0, r: right, b: cy + 9.0 }.d2d(),
+        RectF { l: right - w - 4.0, t: field.t, r: right, b: field.b }.d2d(),
         color(r.pal.pin, alpha),
     );
+    right - w - 12.0
 }
 
 #[cfg(test)]

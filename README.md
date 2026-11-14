@@ -15,7 +15,8 @@ almost nothing while idle.
 | Open | Hover the pill (it expands after a short dwell), click it, or press a hotkey |
 | Notepad (toggle) | `Win+Alt+N` — opens the notepad with the cursor in it; press again or `Esc` to close |
 | Clipboard | `Win+Alt+V` — opens the clipboard list with the search box ready (just start typing) |
-| Switch tab | Click **Notepad** / **Clipboard** in the header, or press `Tab` |
+| Timer | Click **Timer** in the header, type a time such as `25m`, press `Enter` (details below) |
+| Switch tab | Click **Notepad** / **Clipboard** / **Timer** in the header, or press `Tab` |
 | Keep open | The pin in the header: the pill stays open until you unpin it, press `Esc`, or click the chevron |
 | Close | Move the mouse away, `Esc`, the chevron, or click another app |
 | Hide / show the pill | `Win+Alt+H`, the tray menu, or the commands below |
@@ -31,8 +32,9 @@ nothing to edit and no restart:
 
 * **Theme**: Dark (default), Light, or Match Windows (follows Windows' app light/dark mode and
   switches with it).
-* **Accent colour**: Classic keeps the logo's two tones (amber notepad, cyan clipboard); Sky, Amber,
-  Mint, Violet and Rose use one colour for both tabs, the selected entry and the copy peek's check.
+* **Accent colour**: Classic keeps the logo's two tones (amber notepad, cyan clipboard) and gives the
+  timer its own violet; Sky, Amber, Mint, Violet and Rose use one colour for all three tabs, the
+  selected entry and the copy peek's check.
 * **Text size**: Small, Default or Large for the text you read: the notes and the clipboard
   entries. The header, tabs and hints keep their size.
 * **Monitor**: which display the pill sits on. It follows the primary display unless you pick another
@@ -109,6 +111,26 @@ across restarts. If Notch isn't running, the commands just tell you so.
   (`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory = 0`) is never
   recorded, and Notch ignores changes it makes itself.
 
+### Timer
+
+One timer at a time, on the third tab.
+
+* **Set a time**: type `25m`, `1h 30m`, `90s`, `2 hours` or a bare number (minutes), or tap a chip
+  (5 min, 10 min, 25 min, 45 min, 1 hour). The box shows what it means (`= 25:00`) and when the timer
+  will end. Add an optional label, then press `Enter` or **Start**. Up to 24 hours. Starting a new
+  timer replaces the current one.
+* **While it runs** the tab shows a ring and the time left, with stop (x), pause / resume and
+  **+1 min**. Collapse the pill and it carries on: the resting pill shows the ring and the digits (a
+  play mark while paused), the header's Timer tab shows the time left whichever tab is open, and a
+  copy peek keeps the timer on its right.
+* **Hover** the pill while a timer runs and it widens into a capsule instead of opening the panel:
+  notepad and clipboard buttons, the ring (click to pause or resume) and the time (click to open the
+  Timer tab). Click anywhere else on it to open the panel.
+* **Time's up**: the pill widens and glows with **+5 min** and **Done** until you press one (+5 min
+  starts a fresh five minutes). If the pill is hidden (a full-screen app is in front, or you hid it)
+  Windows shows a notification instead. There is no sound.
+* The timer is not saved (quitting Notch ends it) and does not count time the PC spends asleep.
+
 ## Settings
 
 Optional file: `%APPDATA%\Notch\settings.json` (all keys optional; restart to apply).
@@ -157,6 +179,9 @@ If `notes.json` is ever unreadable it is kept as `notes.json.bad` rather than ov
 * **Small resident set.** The index only holds short text previews; full text and images stay on
   disk and are read only when pasted. Thumbnails are decoded while the pill is open and dropped when
   it closes. The notepad control is created the first time it is shown.
+* **The timer ticks only while it runs.** One one-shot Windows timer, set for the exact moment the
+  displayed second changes, redraws the digits and the ring once a second; paused, stopped or idle,
+  nothing wakes up.
 * **Click-through.** The window region is clipped to the visible pill, so clicks around it reach the
   windows underneath.
 * **Hides itself** while a full-screen app or game is in front (event-driven, no polling).
