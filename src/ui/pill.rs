@@ -10,7 +10,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -30,6 +30,17 @@ pub fn radius(h: f32) -> f32 {
 pub fn hline(r: &Renderer, y: f32, alpha: f32) {
     let p = exp();
     r.fill_rect(RectF { l: p.l + 6.0, t: y, r: p.r - 6.0, b: y + 1.0 }.d2d(), color(r.pal.rule, alpha));
+}
+
+/// "[Esc] to collapse" at the right end of a footer whose centre line is `cy`.
+pub fn collapse_hint(r: &Renderer, cy: f32, alpha: f32) {
+    let p = exp();
+    let label = "to collapse";
+    let lw = r.text_w(F::Hint, label);
+    let label_l = p.r - 20.0 - lw;
+    r.text(label, F::Hint, RectF { l: label_l, t: cy - 9.0, r: label_l + lw + 4.0, b: cy + 9.0 }.d2d(), color(r.pal.muted, alpha));
+    let key_w = keycap_width(r, "Esc");
+    keycap(r, "Esc", label_l - 7.0 - key_w, cy, alpha);
 }
 
 pub fn keycap_width(r: &Renderer, text: &str) -> f32 {
@@ -68,10 +79,21 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     // The collapsed indicator (a faint dash) gives way to the peek's badge.
     // (and it only comes back once the text has gone too, so it never shows through "Copied")
     let dash_gone = peek.map_or(0.0, |p| (p.look.icon + p.look.old_icon).max(p.look.label).max(p.look.line).min(1.0));
-    draw_body(r, pill, rad, t, body_a, 1.0 - dash_gone);
+    // a running timer takes the dash's place on the resting pill; the capsules cover it
+    let timer_rests = v.timer.active() && peek.is_none() && v.timer.capsule == Capsule::None;
+    let dash = if timer_rests || v.timer.capsule != Capsule::None { 0.0 } else { 1.0 - dash_gone };
+    draw_body(r, pill, rad, t, body_a, dash);
+    if timer_rests {
+        timer_view::draw_resting(r, v, pill, (1.0 - t * 4.0).clamp(0.0, 1.0));
+    }
 
     if let Some(p) = peek {
         draw_peek(r, v, pill, p);
+    }
+    match v.timer.capsule {
+        Capsule::Hover => timer_view::draw_hover(r, v, pill),
+        Capsule::TimesUp => timer_view::draw_times_up(r, v, pill),
+        Capsule::None => {}
     }
 
     // Content is laid out for the fully open size and fades in late; the clip keeps it inside
@@ -83,6 +105,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
         match v.tab {
             Tab::Notes => notes_view::draw(r, v, alpha),
             Tab::Clipboard => clip_list::draw(r, v, alpha),
+            Tab::Timer => timer_view::draw(r, v, alpha),
         }
         r.pop_clip();
     }
@@ -118,8 +141,10 @@ fn draw_peek(r: &mut Renderer, v: &View, pill: RectF, pk: &PeekView) {
     let pal = r.pal;
     let label = "Copied";
     let label_w = r.text_w(F::Seg, label);
-    let new_lay = peek::layout(c.target_w, c.slack, label_w);
-    let old_lay = pk.prev.map(|o| peek::layout(o.target_w, o.slack, label_w));
+    // with a timer running the capsule is wider by `peek_slot`; the copy's own layout leaves that out
+    let slot = v.timer.peek_slot;
+    let new_lay = peek::layout(c.target_w - slot, c.slack, label_w);
+    let old_lay = pk.prev.map(|o| peek::layout(o.target_w - slot, o.slack, label_w));
     // badge and label glide from where the previous content had them to where this one wants them
     let lay = old_lay.map_or(new_lay, |o| peek::lerp_layout(o, new_lay, look.shift));
     let cy = pill.cy();
@@ -150,6 +175,7 @@ fn draw_peek(r: &mut Renderer, v: &View, pill: RectF, pk: &PeekView) {
         r.text(&c.line, F::Tab, text_r.d2d(), color(pal.text2, look.line));
     }
     r.pop_clip();
+    timer_view::draw_peek_slot(r, v, pill, look.label);
 }
 
 /// The capsule's leading badge centred on (`cx`, `cy`): an accent disc whose check mark draws
@@ -204,6 +230,7 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
     let segments = [
         (seg_notes(), "Notepad", '\u{E8A5}', Tab::Notes, Hit::TabNotes, pal.notes),
         (seg_clip(), "Clipboard", '\u{E77F}', Tab::Clipboard, Hit::TabClip, pal.clip),
+        (seg_timer(), "Timer", '\u{E916}', Tab::Timer, Hit::TabTimer, pal.timer),
     ];
     for (rect, label, glyph, tab, hit, accent) in segments {
         let active = v.tab == tab;
@@ -211,6 +238,11 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
             r.fill_rrect(rect.d2d(), rect.h() / 2.0, color(pal.seg_active(accent), alpha));
         } else if v.hover == hit {
             r.fill_rrect(rect.d2d(), rect.h() / 2.0, color(pal.wash, 0.05 * alpha));
+        }
+        if tab == Tab::Timer {
+            // "Timer" while idle; the time left while timing, whichever tab is open
+            timer_view::draw_segment(r, v, rect, active, v.hover == hit, alpha);
+            continue;
         }
         let fg = if active { accent } else if v.hover == hit { pal.text2 } else { pal.muted };
         r.glyph(glyph, F::Icon16, rect.l + 22.0, rect.cy(), color(fg, alpha));

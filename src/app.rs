@@ -17,8 +17,11 @@ use crate::store::{Kind, Store, now_secs};
 use crate::ui::clip_list::{self, ListLayout};
 use crate::ui::theme::Palette;
 use crate::ui::notes_view::{self, NoteTabs};
+use crate::timer::{self, Phase, Timer};
+use crate::ui::timer_view::PRESETS;
 use crate::ui::{
-    self, COLLAPSED_H, COLLAPSED_W, EXPANDED_H, EXPANDED_W, Hit, HitCtx, PEEK_H, PeekView, Tab, View, WIN_H, WIN_W,
+    self, COLLAPSED_H, COLLAPSED_W, Capsule, EXPANDED_H, EXPANDED_W, HOVER_W, Hit, HitCtx, PEEK_H, PEEK_TIMER_W, PeekView,
+    TIMES_UP_W, Tab, TimerField, TimerView, View, WIN_H, WIN_W,
 };
 use crate::window;
 use std::cell::{Cell, RefCell};
@@ -50,6 +53,8 @@ const T_FS: usize = 4;
 const T_PASTE: usize = 5;
 /// The copy-peek capsule has been up long enough: start taking it down.
 const T_PEEK: usize = 6;
+/// The timer's displayed second is about to change (or its time is up).
+const T_TIMER: usize = 7;
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -144,6 +149,18 @@ pub struct App {
     renaming: Cell<Option<usize>>,
     /// The "Copied" capsule shown by the collapsed pill after a copy (see `peek.rs`).
     peek: RefCell<Option<Peek>>,
+    /// The timer (one at a time) and its form: what is typed, which box has the caret.
+    timer: RefCell<Timer>,
+    timer_input: RefCell<String>,
+    timer_label: RefCell<String>,
+    timer_focus: Cell<TimerField>,
+    /// The cursor rests on the collapsed pill while a timer runs: it widens into the hover capsule.
+    hover_peek: Cell<bool>,
+    /// Width the copy-peek capsule reserved for the timer when it was composed.
+    peek_slot: Cell<f32>,
+    /// When "stop" or "Done" was clicked: the form appears under the pointer, so a double-click
+    /// must not press "Start" with its second click.
+    last_timer_stop: Cell<Option<Instant>>,
 
     renderer: RefCell<Option<Renderer>>,
     pub store: RefCell<Store>,
@@ -209,6 +226,13 @@ impl App {
             last_close: Cell::new(None),
             renaming: Cell::new(None),
             peek: RefCell::new(None),
+            timer: RefCell::new(Timer::new()),
+            timer_input: RefCell::new("25m".into()),
+            timer_label: RefCell::new("Focus".into()),
+            timer_focus: Cell::new(TimerField::Time),
+            hover_peek: Cell::new(false),
+            peek_slot: Cell::new(0.0),
+            last_timer_stop: Cell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
             notes,
@@ -398,7 +422,8 @@ impl App {
         // and snaps shut; the copy peek easing back to the resting pill is in between.
         let (growing, peek_leaving) = {
             let p = self.peek.borrow();
-            (self.open.get() || p.as_ref().is_some_and(Peek::growing), p.is_some())
+            let widening = self.open.get() || p.as_ref().is_some_and(Peek::growing) || self.capsule() != Capsule::None;
+            (widening, p.is_some())
         };
         let (freq, zeta) = if growing {
             (anim::FREQ, anim::ZETA)
@@ -505,7 +530,8 @@ impl App {
             let s = self.cfg();
             (s.copy_peek, s.copy_peek_preview, s.copy_peek_ms)
         };
-        if !enabled || self.open.get() || self.is_hidden() || self.h.get().pos > PEEK_H + 8.0 {
+        // (the time's-up and hover capsules outrank a copy toast)
+        if !enabled || self.open.get() || self.is_hidden() || self.capsule() != Capsule::None || self.h.get().pos > PEEK_H + 8.0 {
             crate::log(&format!(
                 "copy peek skipped: enabled={enabled} open={} hidden={} h={:.0}",
                 self.open.get(),
@@ -514,12 +540,16 @@ impl App {
             ));
             return;
         }
-        let content = {
+        let mut content = {
             let r = self.renderer.borrow();
             let Some(r) = r.as_ref() else { return };
             let label_w = r.text_w(F::Seg, "Copied");
             peek::compose(copied, preview, label_w, |line| r.measure(F::Tab, line))
         };
+        // a running timer keeps the right end of the capsule: the copy takes the left
+        let timer_w = if self.timer.borrow().active() { PEEK_TIMER_W } else { 0.0 };
+        content.target_w += timer_w;
+        self.peek_slot.set(timer_w);
         let target_w = content.target_w;
         let now = Instant::now();
         let reduced = shell::reduced_motion();
@@ -571,7 +601,7 @@ impl App {
             self.start_anim(); // the fade-out needs the frame loop; the size does not move
         } else {
             // the width starts easing back at once, while the text is still fading out
-            self.set_targets(COLLAPSED_W, COLLAPSED_H);
+            self.to_rest();
         }
     }
 
@@ -582,7 +612,7 @@ impl App {
             Some(Advance::Finished) => {
                 // reduced motion: the capsule has faded out; go straight back to the resting size
                 *self.peek.borrow_mut() = None;
-                self.set_targets(COLLAPSED_W, COLLAPSED_H);
+                self.to_rest();
                 let (mut w, mut h) = (self.w.get(), self.h.get());
                 w.snap();
                 h.snap();
@@ -599,6 +629,142 @@ impl App {
             let _ = KillTimer(Some(self.hwnd), T_PEEK);
         }
         *self.peek.borrow_mut() = None;
+    }
+
+    // ----------------------------------------------------------------- timer
+
+    /// The collapsed pill's shape: a capsule while the time is up, or while the cursor rests on it
+    /// with a timer running; the plain pill otherwise.
+    fn capsule(&self) -> Capsule {
+        if self.open.get() {
+            Capsule::None
+        } else if self.timer.borrow().phase() == Phase::Finished {
+            Capsule::TimesUp
+        } else if self.hover_peek.get() {
+            Capsule::Hover
+        } else {
+            Capsule::None
+        }
+    }
+
+    /// The size the pill rests at while it is not open.
+    fn rest_size(&self) -> (f32, f32) {
+        match self.capsule() {
+            Capsule::TimesUp => (TIMES_UP_W, PEEK_H),
+            Capsule::Hover => (HOVER_W, PEEK_H),
+            Capsule::None => (COLLAPSED_W, COLLAPSED_H),
+        }
+    }
+
+    fn to_rest(&self) {
+        let (w, h) = self.rest_size();
+        self.set_targets(w, h);
+    }
+
+    /// The timer changed the pill's shape (stopped, extended, dismissed): go to the right resting
+    /// size, unless the panel is open or a copy toast is on show.
+    fn settle_capsule(&self) {
+        if !self.open.get() && self.peek.borrow().is_none() && !self.is_hidden() {
+            self.to_rest();
+        }
+    }
+
+    /// The cursor has rested on the collapsed pill: with a timer running it widens into the hover
+    /// capsule instead of opening the panel.
+    fn on_dwell(&self) {
+        if self.timer.borrow().active() {
+            self.hover_peek.set(true);
+            self.peek_clear();
+            self.to_rest();
+        } else {
+            self.expand();
+        }
+    }
+
+    /// The timer's state changed: set the one wake-up at the next digit change (none unless it is
+    /// running), and redraw.
+    fn timer_changed(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), T_TIMER);
+        }
+        if let Some(wait) = self.timer.borrow().next_tick(Instant::now()) {
+            unsafe {
+                SetTimer(Some(self.hwnd), T_TIMER, wait.as_millis() as u32, None);
+            }
+        }
+        self.invalidate();
+    }
+
+    fn timer_tick(&self) {
+        if self.timer.borrow_mut().tick(Instant::now()) {
+            self.on_timer_finished();
+        }
+        self.timer_changed();
+    }
+
+    /// The time is up: the pill widens into the "Time's up" capsule. With the pill hidden (a
+    /// full-screen app in front, or hidden on request) a Windows notification says so instead.
+    fn on_timer_finished(&self) {
+        if self.is_hidden() {
+            let label = self.timer.borrow().label.clone();
+            shell::notify(self.hwnd, "Time's up", if label.is_empty() { "Your timer has finished." } else { &label });
+        }
+        self.peek_clear(); // an alarm outranks a copy toast
+        self.settle_capsule();
+    }
+
+    fn start_timer(&self) {
+        let Some(secs) = timer::parse(&self.timer_input.borrow()) else { return };
+        let label = self.timer_label.borrow().clone();
+        self.timer.borrow_mut().start(secs, &label, Instant::now());
+        self.timer_changed();
+    }
+
+    fn timer_pause_toggle(&self) {
+        self.timer.borrow_mut().toggle_pause(Instant::now());
+        self.timer_changed();
+    }
+
+    /// "+1 min" and "+5 min".
+    fn timer_add(&self, secs: u64) {
+        self.timer.borrow_mut().add(secs, Instant::now());
+        self.timer_changed();
+        self.settle_capsule(); // "+5 min" on the time's-up capsule: back to the plain pill
+    }
+
+    /// Stop (x) or Done: back to the form.
+    fn timer_stop(&self) {
+        self.timer.borrow_mut().cancel();
+        self.last_timer_stop.set(Some(Instant::now()));
+        self.timer_changed();
+        self.settle_capsule();
+    }
+
+    /// Clicking a box of the form means "I want to type": take keyboard focus.
+    fn focus_timer_box(&self, field: TimerField) {
+        self.timer_focus.set(field);
+        self.sticky.set(true);
+        self.activate_pill();
+        self.invalidate();
+    }
+
+    /// A click on a control of the Timer tab.
+    fn on_timer_click(&self, hit: Hit) {
+        let just_stopped = self.last_timer_stop.get().is_some_and(|t| t.elapsed() < Duration::from_millis(450));
+        match hit {
+            Hit::TimerField => self.focus_timer_box(TimerField::Time),
+            Hit::TimerLabel => self.focus_timer_box(TimerField::Label),
+            Hit::TimerPreset(i) => {
+                *self.timer_input.borrow_mut() = PRESETS[i].1.to_string();
+                self.invalidate();
+            }
+            Hit::TimerStart if !just_stopped => self.start_timer(),
+            Hit::TimerStop | Hit::TimerDone => self.timer_stop(),
+            Hit::TimerPause => self.timer_pause_toggle(),
+            Hit::TimerPlus => self.timer_add(60),
+            Hit::TimerAdd5 => self.timer_add(300),
+            _ => {}
+        }
     }
 
     // --------------------------------------------------------------- render
@@ -633,6 +799,10 @@ impl App {
                 prev: p.prev.as_ref(),
                 look: p.look(w, Instant::now()),
             });
+            let timer = self.timer.borrow();
+            let (timer_input, timer_label) = (self.timer_input.borrow(), self.timer_label.borrow());
+            let (tnow, parsed) = (Instant::now(), timer::parse(&timer_input));
+            let ends = shell::clock_after(if timer.phase() == Phase::Idle { parsed.unwrap_or(0) } else { timer.left_secs(tnow) });
             let view = View {
                 w,
                 h,
@@ -653,6 +823,19 @@ impl App {
                 renaming: self.renaming.get(),
                 peek: peek_view,
                 now: now_secs(),
+                timer: TimerView {
+                    phase: timer.phase(),
+                    left: timer.left_secs(tnow),
+                    frac: timer.fraction(tnow),
+                    label: &timer.label,
+                    ends: &ends,
+                    input: &timer_input,
+                    label_input: &timer_label,
+                    parsed,
+                    focus: self.timer_focus.get(),
+                    capsule: self.capsule(),
+                    peek_slot: self.peek_slot.get(),
+                },
             };
             match ui::pill::draw(r, &view) {
                 Ok(()) => false,
@@ -764,6 +947,7 @@ impl App {
             self.notes.prepare(self.hwnd);
         }
         self.peek_clear(); // the springs carry on from wherever the capsule was
+        self.hover_peek.set(false);
         self.open.set(true);
         self.relayout_tabs(true); // show the active note's tab even if the row is scrolled elsewhere
         self.set_targets(EXPANDED_W, EXPANDED_H);
@@ -842,7 +1026,8 @@ impl App {
             self.scroll.set(0.0);
             self.query.borrow_mut().clear();
             self.invalidate_list();
-            self.set_targets(COLLAPSED_W, COLLAPSED_H);
+            self.hover_peek.set(false);
+            self.to_rest(); // the plain pill, or the "Time's up" capsule if the time ran out
 
             if ours {
                 let prev = self.prev_fg.get();
@@ -959,6 +1144,8 @@ impl App {
                 scroll: self.scroll.get(),
                 list,
                 tabs: tabs.as_ref().unwrap_or(&empty),
+                timer: self.timer.borrow().phase(),
+                capsule: self.capsule(),
             },
         )
     }
@@ -989,12 +1176,21 @@ impl App {
             self.tracking.set(true);
         }
         if !self.open.get() {
-            if self.hover_lock.get() || self.dwell_pending.get() || self.is_hidden() {
+            let capsule = self.capsule();
+            if capsule != Capsule::None {
+                // a capsule is up: light the button under the pointer (it needs no dwell to open)
+                let hit = self.hit_at(x, y);
+                if hit != self.hover.get() {
+                    self.hover.set(hit);
+                    self.invalidate();
+                }
+            }
+            if capsule != Capsule::None || self.hover_lock.get() || self.dwell_pending.get() || self.is_hidden() {
                 return;
             }
             let d = self.cfg().hover_dwell_ms;
             if d == 0 {
-                self.expand();
+                self.on_dwell();
             } else {
                 self.dwell_pending.set(true);
                 unsafe {
@@ -1031,6 +1227,9 @@ impl App {
         if self.open.get() && self.auto_close_ok() {
             self.arm_collapse();
         }
+        if self.hover_peek.replace(false) {
+            self.to_rest(); // the hover capsule goes back to the plain pill
+        }
     }
 
     fn on_click(&self, px: i32, py: i32, shift: bool) {
@@ -1044,14 +1243,32 @@ impl App {
             ));
         }
         if !self.open.get() {
-            if self.hit_at(x, y) == Hit::Pill {
-                self.open_sticky(None);
+            match self.hit_at(x, y) {
+                // the time's-up capsule opens the Timer tab; the plain pill and the hover capsule, the panel
+                Hit::Pill if self.capsule() == Capsule::TimesUp => self.open_sticky(Some(Tab::Timer)),
+                Hit::Pill => self.open_sticky(None),
+                Hit::PeekNotes => self.open_sticky(Some(Tab::Notes)),
+                Hit::PeekClip => self.open_sticky(Some(Tab::Clipboard)),
+                Hit::PeekTime => self.open_sticky(Some(Tab::Timer)),
+                Hit::PeekRing => self.timer_pause_toggle(),
+                h @ (Hit::TimerDone | Hit::TimerAdd5) => self.on_timer_click(h),
+                _ => {}
             }
             return;
         }
         match self.hit_at(x, y) {
             Hit::TabNotes => self.set_tab(Tab::Notes),
             Hit::TabClip => self.set_tab(Tab::Clipboard),
+            Hit::TabTimer => self.set_tab(Tab::Timer),
+            h @ (Hit::TimerField
+            | Hit::TimerLabel
+            | Hit::TimerPreset(_)
+            | Hit::TimerStart
+            | Hit::TimerStop
+            | Hit::TimerPause
+            | Hit::TimerPlus
+            | Hit::TimerDone
+            | Hit::TimerAdd5) => self.on_timer_click(h),
             Hit::BtnPin => {
                 self.keep_open.set(!self.keep_open.get());
                 if self.keep_open.get() {
@@ -1201,42 +1418,60 @@ impl App {
         self.invalidate();
     }
 
-    /// `WM_CHAR`: typing while the clipboard tab has focus edits the search field.
-    fn on_char(&self, c: u16) {
-        if !self.expanded() || self.tab.get() != Tab::Clipboard || self.renaming.get().is_some() {
-            return;
-        }
-        {
-            let mut q = self.query.borrow_mut();
-            match c {
-                0x08 => {
-                    q.pop();
-                }
-                c if c < 0x20 || c == 0x7F => return, // Enter, Esc, Ctrl+letter...
-                c if (0xD800..0xDC00).contains(&c) => {
-                    self.high_surrogate.set(c); // first half of an emoji etc.
-                    return;
-                }
-                c => {
-                    let ch = if (0xDC00..0xE000).contains(&c) {
-                        let hi = self.high_surrogate.replace(0);
-                        char::decode_utf16([hi, c]).next().and_then(|r| r.ok())
-                    } else {
-                        char::from_u32(c as u32)
-                    };
-                    if let Some(ch) = ch {
-                        if q.chars().count() < 200 {
-                            q.push(ch);
-                        }
+    /// Applies one `WM_CHAR` to a text box (at most `max` characters): backspace, a character, or
+    /// half of a surrogate pair. Returns true if the text changed.
+    fn type_into(&self, s: &mut String, c: u16, max: usize) -> bool {
+        match c {
+            0x08 => s.pop().is_some(),
+            c if c < 0x20 || c == 0x7F => false, // Enter, Esc, Ctrl+letter...
+            c if (0xD800..0xDC00).contains(&c) => {
+                self.high_surrogate.set(c); // first half of an emoji etc.
+                false
+            }
+            c => {
+                let ch = if (0xDC00..0xE000).contains(&c) {
+                    let hi = self.high_surrogate.replace(0);
+                    char::decode_utf16([hi, c]).next().and_then(|r| r.ok())
+                } else {
+                    char::from_u32(c as u32)
+                };
+                match ch {
+                    Some(ch) if s.chars().count() < max => {
+                        s.push(ch);
+                        true
                     }
+                    _ => false,
                 }
             }
         }
-        self.query_changed();
     }
 
-    /// Keys the pill itself handles: Esc and Tab. (The clipboard list is driven with the mouse or
-    /// trackpad; typing goes to the search box through `on_char`.)
+    /// `WM_CHAR`: typing edits the clipboard search box, or a box of the timer's form.
+    fn on_char(&self, c: u16) {
+        if !self.expanded() || self.renaming.get().is_some() {
+            return;
+        }
+        match self.tab.get() {
+            Tab::Clipboard => {
+                if self.type_into(&mut self.query.borrow_mut(), c, 200) {
+                    self.query_changed();
+                }
+            }
+            Tab::Timer if self.timer.borrow().phase() == Phase::Idle => {
+                let (text, max) = match self.timer_focus.get() {
+                    TimerField::Time => (&self.timer_input, 12),
+                    TimerField::Label => (&self.timer_label, 30),
+                };
+                if self.type_into(&mut text.borrow_mut(), c, max) {
+                    self.invalidate();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Keys the pill itself handles: Esc, Tab, and Enter on the timer's form. (The clipboard list
+    /// is driven with the mouse or trackpad; typing goes to a text box through `on_char`.)
     fn on_key(&self, vk: u32) {
         match VIRTUAL_KEY(vk as u16) {
             VK_ESCAPE => {
@@ -1248,8 +1483,15 @@ impl App {
                 }
             }
             VK_TAB => {
-                let next = if self.tab.get() == Tab::Notes { Tab::Clipboard } else { Tab::Notes };
+                let next = match self.tab.get() {
+                    Tab::Notes => Tab::Clipboard,
+                    Tab::Clipboard => Tab::Timer,
+                    Tab::Timer => Tab::Notes,
+                };
                 self.set_tab(next);
+            }
+            VK_RETURN if self.expanded() && self.tab.get() == Tab::Timer && self.timer.borrow().phase() == Phase::Idle => {
+                self.start_timer();
             }
             _ => {}
         }
@@ -1498,7 +1740,7 @@ impl App {
     fn set_cursor(&self) {
         let id = match self.hover.get() {
             Hit::None | Hit::Pill => IDC_ARROW,
-            Hit::Search => IDC_IBEAM,
+            Hit::Search | Hit::TimerField | Hit::TimerLabel => IDC_IBEAM,
             _ => IDC_HAND,
         };
         unsafe {
@@ -1521,7 +1763,7 @@ impl App {
             T_DWELL => {
                 self.dwell_pending.set(false);
                 if !self.open.get() && !self.hover_lock.get() && self.cursor_in_pill() {
-                    self.expand();
+                    self.on_dwell();
                 }
             }
             T_COLLAPSE => {
@@ -1538,6 +1780,7 @@ impl App {
                 self.notes.flush();
             }
             T_PEEK => self.peek_hold_over(),
+            T_TIMER => self.timer_tick(),
             T_FS => self.update_fullscreen(),
             T_PASTE => {
                 crate::log(&format!("send Ctrl+V; foreground={:?}", unsafe { GetForegroundWindow() }));
@@ -1583,6 +1826,7 @@ impl App {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
+            self.to_rest(); // a time's-up capsule that came due while hidden is waiting
             self.invalidate();
         }
         crate::log(&format!(

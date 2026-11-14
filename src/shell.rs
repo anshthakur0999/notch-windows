@@ -159,6 +159,35 @@ pub fn reduced_motion() -> bool {
     ok.is_ok() && !on.as_bool()
 }
 
+/// A Windows notification through the tray icon (a toast on Windows 10/11). The timer uses it
+/// when its time is up while the pill is hidden.
+pub fn notify(hwnd: HWND, title: &str, text: &str) {
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ID,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO,
+        ..Default::default()
+    };
+    // szInfoTitle holds 64 UTF-16 units and szInfo 256, each with its terminating NUL
+    for (i, c) in title.encode_utf16().take(63).enumerate() {
+        nid.szInfoTitle[i] = c;
+    }
+    for (i, c) in text.encode_utf16().take(255).enumerate() {
+        nid.szInfo[i] = c;
+    }
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// The local wall-clock time `secs` from now, as "10:31 pm".
+pub fn clock_after(secs: u64) -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    crate::timer::ends_at(t.wHour as u32, t.wMinute as u32, t.wSecond as u32, secs)
+}
+
 pub fn remove_tray(hwnd: HWND) {
     unsafe {
         let nid = NOTIFYICONDATAW {
