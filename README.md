@@ -4,8 +4,8 @@
 
 # Notch
 
-A tiny floating pill at the top-centre of your screen (think Dynamic Island) with a **notepad** and
-**clipboard history**. Written in Rust against raw Win32 + DirectComposition/Direct2D, built to cost
+A tiny floating pill at the top-centre of your screen (think Dynamic Island) with a **notepad**,
+**clipboard history**, a **timer** and a **file shelf**. Written in Rust against raw Win32 + DirectComposition/Direct2D, built to cost
 almost nothing while idle.
 
 ## Use it
@@ -16,7 +16,8 @@ almost nothing while idle.
 | Notepad (toggle) | `Win+Alt+N` — opens the notepad with the cursor in it; press again or `Esc` to close |
 | Clipboard | `Win+Alt+V` — opens the clipboard list with the search box ready (just start typing) |
 | Timer | Click **Timer** in the header, type a time such as `25m`, press `Enter` (details below) |
-| Switch tab | Click **Notepad** / **Clipboard** / **Timer** in the header, or press `Tab` |
+| Shelf | Drop files on the pill, then open the **Shelf** tab (details below) |
+| Switch tab | Click **Notepad** / **Clipboard** / **Timer** / **Shelf** in the header, or press `Tab` |
 | Keep open | The pin in the header: the pill stays open until you unpin it, press `Esc`, or click the chevron |
 | Close | Move the mouse away, `Esc`, the chevron, or click another app |
 | Hide / show the pill | `Win+Alt+H`, the tray menu, or the commands below |
@@ -131,6 +132,28 @@ One timer at a time, on the third tab.
   Windows shows a notification instead. There is no sound.
 * The timer is not saved (quitting Notch ends it) and does not count time the PC spends asleep.
 
+### Shelf
+
+A parking spot for files while you work: drop them on the pill now, drag them out into any app later.
+
+* **Drop** files or folders on the pill from Explorer, the desktop or any app. While you drag, the
+  pill widens into a drop zone and glows when you are over it; on release a small **Added** toast
+  says how many. Dropping on the open panel works too. It holds up to 48 files (the oldest go first).
+* The shelf holds **links, not copies**: nothing is duplicated and nothing is moved. If a file is
+  moved or deleted, its tile says **Missing** and the x removes it. UNC (network) paths are not
+  checked, so they are never marked missing.
+* The resting pill shows a tray and the file count (beside the timer when one runs); hovering shows a
+  shelf button with the count.
+* **Drag out**: press a tile and drag. Ticked tiles go together (click a tile to tick it); a tile
+  that is not ticked goes alone; **Drag all** takes every file still there. The drop is always a
+  copy, so the originals stay where they are. `Esc` cancels a drag.
+* `Del` removes the ticked tiles from the shelf (never from disk); **Clear** empties it.
+* Files leave the shelf after **24 hours**: set `"shelf_hours"` (0 = keep until removed).
+* Each tile shows the same preview Explorer does: a thumbnail for images, PDFs, videos and the like,
+  otherwise the file's icon. Previews load in the background while the panel is open.
+* Limits: real files only (not images dragged out of a browser), and Windows blocks dragging from an
+  elevated (admin) app onto a normal one.
+
 ## Settings
 
 Optional file: `%APPDATA%\Notch\settings.json` (all keys optional; restart to apply).
@@ -152,6 +175,7 @@ Optional file: `%APPDATA%\Notch\settings.json` (all keys optional; restart to ap
   "accent": "classic",
   "text_size": "medium",
   "monitor": "",
+  "shelf_hours": 24,
   "use_gpu": false
 }
 ```
@@ -166,7 +190,7 @@ graphics vendor's user-mode driver, which cost ~55 MB more RAM in testing (Intel
 rasteriser (WARP) renders each animation frame in about 1 ms.
 
 Data lives in `%APPDATA%\Notch`: `notes.json` + `notes\<id>.txt` (the notepad), `clips.json` (index)
-and `clips\` (payloads). A single `notes.txt` from an earlier version is migrated automatically.
+and `clips\` (payloads), `shelf.json` (the paths on the shelf). A single `notes.txt` from an earlier version is migrated automatically.
 If `notes.json` is ever unreadable it is kept as `notes.json.bad` rather than overwritten.
 
 ## Why it is light

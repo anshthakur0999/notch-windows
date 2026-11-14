@@ -127,6 +127,8 @@ pub struct Settings {
     /// Which monitor the pill sits on: the display's device name (`\\.\DISPLAY2`), or empty for
     /// the primary one. If that display is not connected the primary one is used (tray menu).
     pub monitor: String,
+    /// Files on the shelf clear themselves after this many hours (0 = keep until cleared).
+    pub shelf_hours: u32,
 }
 
 impl Default for Settings {
@@ -148,6 +150,7 @@ impl Default for Settings {
             accent: Accent::default(),
             text_size: TextSize::default(),
             monitor: String::new(),
+            shelf_hours: 24,
         }
     }
 }

@@ -34,27 +34,28 @@ pub struct Palette {
     pub danger: u32,
     /// The pin / "paused" amber: a fixed meaning, not part of the accent.
     pub pin: u32,
-    /// Accent for the notepad side, the clipboard side and the timer (the same colour unless
-    /// `Classic`, which gives the timer its own violet).
+    /// Accent for the notepad side, the clipboard side, the timer and the shelf (the same colour
+    /// unless `Classic`, which gives the timer its own violet and the shelf its own green).
     pub notes: u32,
     pub clip: u32,
     pub timer: u32,
+    pub shelf: u32,
     /// Ink on top of an accent fill (the check mark in the copy peek's badge).
     pub ink: u32,
     /// Notepad editor text.
     pub editor_text: u32,
 }
 
-/// (notepad, clipboard, timer) accent for the dark and light pill.
-fn accent_pair(accent: Accent, light: bool) -> (u32, u32, u32) {
+/// (notepad, clipboard, timer, shelf) accent for the dark and light pill.
+fn accent_pair(accent: Accent, light: bool) -> (u32, u32, u32, u32) {
     // dark = bright on a dark panel; light = deeper so it reads on a pale one
-    let one = |dark: u32, deep: u32| if light { (deep, deep, deep) } else { (dark, dark, dark) };
+    let one = |dark: u32, deep: u32| if light { (deep, deep, deep, deep) } else { (dark, dark, dark, dark) };
     match accent {
         Accent::Classic => {
             if light {
-                (0xB97B0C, 0x0A86C4, 0x6D4FD8)
+                (0xB97B0C, 0x0A86C4, 0x6D4FD8, 0x12936A)
             } else {
-                (0xE9B44C, 0x4FC3F7, 0xBFA6FF)
+                (0xE9B44C, 0x4FC3F7, 0xBFA6FF, 0x6EE7B0)
             }
         }
         Accent::Sky => one(0x4FC3F7, 0x0A86C4),
@@ -68,13 +69,13 @@ fn accent_pair(accent: Accent, light: bool) -> (u32, u32, u32) {
 /// The colours a menu swatch shows for an accent (left, right); the same for every accent but
 /// `Classic`, which is two-toned.
 pub fn swatch(accent: Accent) -> (u32, u32) {
-    let (notes, clip, _) = accent_pair(accent, false);
+    let (notes, clip, ..) = accent_pair(accent, false);
     (notes, clip)
 }
 
 impl Palette {
     pub fn new(light: bool, accent: Accent) -> Palette {
-        let (notes, clip, timer) = accent_pair(accent, light);
+        let (notes, clip, timer, shelf) = accent_pair(accent, light);
         if light {
             Palette {
                 light,
@@ -97,6 +98,7 @@ impl Palette {
                 notes,
                 clip,
                 timer,
+                shelf,
                 ink: 0xFFFFFF,
                 editor_text: 0x1A1D22,
             }
@@ -122,6 +124,7 @@ impl Palette {
                 notes,
                 clip,
                 timer,
+                shelf,
                 ink: 0x06222E,
                 editor_text: 0xE8EAED,
             }
@@ -199,7 +202,7 @@ mod tests {
         for light in [false, true] {
             for &a in Accent::ALL {
                 let p = Palette::new(light, a);
-                for c in [p.notes, p.clip, p.timer] {
+                for c in [p.notes, p.clip, p.timer, p.shelf] {
                     assert!(contrast(c, p.body) >= 2.6, "{a:?} light={light} {c:06X} on the panel");
                     assert!(contrast(p.ink, c) >= 3.0, "{a:?} light={light} ink on {c:06X}");
                 }
@@ -213,9 +216,10 @@ mod tests {
             let c = Palette::new(light, Accent::Classic);
             assert_ne!(c.notes, c.clip);
             assert!(c.timer != c.notes && c.timer != c.clip, "the timer has its own violet");
+            assert!(![c.notes, c.clip, c.timer].contains(&c.shelf), "the shelf has its own green");
             for &a in Accent::ALL.iter().filter(|a| **a != Accent::Classic) {
                 let p = Palette::new(light, a);
-                assert_eq!((p.notes, p.timer), (p.clip, p.clip), "{a:?}");
+                assert_eq!((p.notes, p.timer, p.shelf), (p.clip, p.clip, p.clip), "{a:?}");
             }
         }
         assert_ne!(swatch(Accent::Classic).0, swatch(Accent::Classic).1);

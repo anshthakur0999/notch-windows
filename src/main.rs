@@ -5,10 +5,13 @@ mod anim;
 mod app;
 mod cli;
 mod clipboard;
+mod dnd;
 mod notes;
 mod peek;
 mod render;
 mod settings;
+mod shelf;
+mod thumbs;
 mod shell;
 mod store;
 mod timer;
@@ -17,7 +20,7 @@ mod window;
 
 use app::App;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::System::Threading::{CreateMutexW, Sleep};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
@@ -121,7 +124,7 @@ fn main() {
             Sleep(50);
         };
 
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = OleInitialize(None); // also starts COM; drag and drop needs it
 
         let hwnd = match window::create() {
             Ok(h) => h,
@@ -148,7 +151,7 @@ fn main() {
 
         drop(app);
         app::uninstall();
-        CoUninitialize();
+        OleUninitialize();
     }
 }
 
