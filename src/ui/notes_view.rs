@@ -20,6 +20,8 @@ pub struct NoteTabs {
     pub max_scroll: f32,
     /// Tabs carry a delete "x" (there is more than one note to choose from).
     pub closable: bool,
+    /// The one tab that has no "x" because it can never be deleted (the Quick note).
+    pub fixed: Option<usize>,
 }
 
 impl NoteTabs {
@@ -31,13 +33,19 @@ impl NoteTabs {
             scroll: 0.0,
             max_scroll: 0.0,
             closable: false,
+            fixed: None,
         }
+    }
+
+    /// Tab `i` shows a delete "x".
+    pub fn has_x(&self, i: usize) -> bool {
+        self.closable && self.fixed != Some(i)
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
         if self.view.contains(x, y) {
             if let Some(i) = self.tabs.iter().position(|t| t.contains(x, y)) {
-                if self.closable && x >= self.tabs[i].r - CLOSE_ZONE {
+                if self.has_x(i) && x >= self.tabs[i].r - CLOSE_ZONE {
                     return Some(Hit::NoteClose(i));
                 }
                 return Some(Hit::NoteTab(i));
@@ -86,7 +94,7 @@ pub fn plan(widths: &[f32], can_add: bool, scroll: f32) -> NoteTabs {
         tabs.push(RectF { l: x, t: top, r: x + w, b: bot });
         x += w + TAB_GAP;
     }
-    NoteTabs { tabs, add, view: RectF { l: row_l, t: top, r: view_r, b: bot }, scroll, max_scroll, closable: false }
+    NoteTabs { tabs, add, view: RectF { l: row_l, t: top, r: view_r, b: bot }, scroll, max_scroll, closable: false, fixed: None }
 }
 
 /// The scroll position that brings tab `i` fully into view (with a little margin), or the
@@ -136,20 +144,22 @@ pub fn rename_text(b: &RectF, tab: &RectF) -> (f32, f32, f32, f32) {
 
 /// Lays out the tab row for the given note names (widths come from real text measurement).
 /// The tab being renamed, if any, is widened so there is room to type; `scroll` is how far the
-/// row is scrolled (it is clamped, and the result says what it ended up as).
-pub fn layout(r: &Renderer, names: &[String], renaming: Option<usize>, scroll: f32) -> NoteTabs {
+/// row is scrolled (it is clamped, and the result says what it ended up as). `fixed` is the tab
+/// that has no "x" (the Quick note).
+pub fn layout(r: &Renderer, names: &[String], renaming: Option<usize>, fixed: Option<usize>, scroll: f32) -> NoteTabs {
     let closable = names.len() > 1; // with a single note there is nothing to close
-    let slot = if closable { CLOSE_SLOT } else { 0.0 };
     let widths: Vec<f32> = names
         .iter()
         .enumerate()
         .map(|(i, n)| {
+            let slot = if closable && fixed != Some(i) { CLOSE_SLOT } else { 0.0 };
             let w = r.text_w(F::TabOn, n).min(110.0) + 21.0 + slot;
             if renaming == Some(i) { rename_width(w) } else { w }
         })
         .collect();
     let mut t = plan(&widths, names.len() < crate::notes::MAX_NOTES, scroll);
     t.closable = closable;
+    t.fixed = fixed;
     t
 }
 
@@ -170,7 +180,8 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
         let active = i == v.note_active;
         let on_close = v.hover == Hit::NoteClose(i);
         let hover = on_close || v.hover == Hit::NoteTab(i);
-        let slot = if v.note_tabs.closable { CLOSE_SLOT } else { 0.0 };
+        let has_x = v.note_tabs.has_x(i);
+        let slot = if has_x { CLOSE_SLOT } else { 0.0 };
         if v.renaming != Some(i) {
             let text = RectF { l: rect.l + LABEL_INSET, t: rect.t, r: rect.r - LABEL_INSET - slot, b: p.t + 82.0 };
             let c = if active {
@@ -183,7 +194,7 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
             let name = v.note_names.get(i).map(String::as_str).unwrap_or("");
             r.text(name, if active { F::TabOn } else { F::Tab }, text.d2d(), color(c, alpha));
             // the delete "x": on the active tab and whichever tab the pointer is on
-            if v.note_tabs.closable && (active || hover) {
+            if has_x && (active || hover) {
                 let xc = if on_close {
                     pal.danger
                 } else if active {
@@ -340,4 +351,16 @@ mod tests {
         t.closable = true;
         assert_eq!(t.hit(tab.r - 5.0, tab.t + 10.0), Some(Hit::NoteClose(1)));
         assert_eq!(t.hit(tab.l + 20.0, tab.t + 10.0), Some(Hit::NoteTab(1)));
-    }}
+    }
+
+    #[test]
+    fn the_fixed_tab_has_no_x_to_click() {
+        let mut t = plan(&[96.0; 3], true, 0.0);
+        t.closable = true;
+        t.fixed = Some(0); // the Quick note
+        let (quick, other) = (t.tabs[0], t.tabs[1]);
+        assert!(!t.has_x(0) && t.has_x(1));
+        assert_eq!(t.hit(quick.r - 5.0, quick.t + 10.0), Some(Hit::NoteTab(0)), "no x on the Quick note");
+        assert_eq!(t.hit(other.r - 5.0, other.t + 10.0), Some(Hit::NoteClose(1)));
+    }
+}

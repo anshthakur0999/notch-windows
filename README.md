@@ -89,7 +89,9 @@ across restarts. If Notch isn't running, the commands just tell you so.
   end. Up to 30 notes.
 * **Delete** a note with the **x** on its tab (shown on the active tab and on whichever tab you
   point at), by middle-clicking it, with `Ctrl+W`, or from the right-click menu. A note with text
-  asks first; the last remaining note is only cleared, never removed.
+  asks first. The **Quick note** (the first note) is permanent: it has no x and Delete does
+  nothing for it, though you can rename it and clear its text yourself. If a notes list ever lacks
+  it, it comes back, empty, as the first tab.
 * **Double-click** a tab to rename it (Enter saves, Esc cancels). **Right-click** a tab for
   Rename / Delete.
 * Everything is saved automatically, one second after you stop typing.

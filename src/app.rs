@@ -325,11 +325,12 @@ impl App {
     fn layout_tabs(&self, r: &Renderer) -> NoteTabs {
         let names = self.notes.names();
         let renaming = self.renaming.get();
-        let mut t = notes_view::layout(r, &names, renaming, self.tab_scroll.get());
+        let quick = self.notes.quick();
+        let mut t = notes_view::layout(r, &names, renaming, quick, self.tab_scroll.get());
         if self.reveal_tab.replace(false) {
             let s = notes_view::scroll_to_reveal(&t, renaming.unwrap_or(self.notes.active()));
             if (s - t.scroll).abs() > 0.01 {
-                t = notes_view::layout(r, &names, renaming, s);
+                t = notes_view::layout(r, &names, renaming, quick, s);
             }
         }
         self.tab_scroll.set(t.scroll);
@@ -347,6 +348,9 @@ impl App {
 
     /// Scrolls the note-tab row by `dx` DIPs (mouse wheel over the notepad header).
     fn scroll_tabs(&self, dx: f32) {
+        if self.renaming.get().is_some() {
+            return; // the rename box is a window of its own and would not follow the tabs
+        }
         self.ensure_tabs();
         let max = self.tabs.borrow().as_ref().map(|t| t.max_scroll).unwrap_or(0.0);
         let now = self.tab_scroll.get();
@@ -1453,7 +1457,9 @@ impl App {
     fn note_menu(&self, i: usize) {
         self.sticky.set(true);
         self.activate_pill();
-        match shell::popup_menu(self.hwnd, &[(1, "Rename"), (2, "Delete")]) {
+        let items: &[(u32, &str)] =
+            if self.notes.quick() == Some(i) { &[(1, "Rename")] } else { &[(1, "Rename"), (2, "Delete")] };
+        match shell::popup_menu(self.hwnd, items) {
             1 => self.begin_rename(i),
             2 => self.delete_note(i),
             _ => {}
@@ -1461,6 +1467,12 @@ impl App {
     }
 
     fn delete_note(&self, i: usize) {
+        if self.notes.quick() == Some(i) {
+            return; // the Quick note is permanent (Ctrl+W, middle-click and the menu land here too)
+        }
+        // The rename box is a window of its own, tied to a tab number. Deleting a note moves the
+        // tabs after it, so end the rename (keeping what was typed) while the number is still right.
+        self.finish_rename(true);
         self.notes.flush();
         if self.notes.len_on_disk(i) > 0 {
             let text = format!("Delete \u{201C}{}\u{201D}? This cannot be undone.", self.notes.name(i));
