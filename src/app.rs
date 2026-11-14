@@ -636,15 +636,7 @@ impl App {
     /// The collapsed pill's shape: a capsule while the time is up, or while the cursor rests on it
     /// with a timer running; the plain pill otherwise.
     fn capsule(&self) -> Capsule {
-        if self.open.get() {
-            Capsule::None
-        } else if self.timer.borrow().phase() == Phase::Finished {
-            Capsule::TimesUp
-        } else if self.hover_peek.get() {
-            Capsule::Hover
-        } else {
-            Capsule::None
-        }
+        Capsule::pick(self.open.get(), self.timer.borrow().phase(), self.hover_peek.get())
     }
 
     /// The size the pill rests at while it is not open.

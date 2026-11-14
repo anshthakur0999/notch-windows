@@ -45,6 +45,19 @@ pub enum Capsule {
     TimesUp,
 }
 
+impl Capsule {
+    /// The collapsed pill's shape. A finished timer outranks the pointer resting on the pill, and
+    /// the hover capsule needs a timer that is still running (`hover` stays set after "Done").
+    pub fn pick(open: bool, phase: Phase, hover: bool) -> Capsule {
+        match phase {
+            _ if open => Capsule::None,
+            Phase::Finished => Capsule::TimesUp,
+            Phase::Running | Phase::Paused if hover => Capsule::Hover,
+            _ => Capsule::None,
+        }
+    }
+}
+
 /// Which box of the timer form takes the typing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TimerField {
@@ -350,6 +363,23 @@ pub struct PeekView<'a> {
 mod tests {
     use super::*;
     use crate::anim::Spring;
+
+    #[test]
+    fn the_hover_capsule_needs_a_running_timer_and_a_closed_panel() {
+        use Phase::*;
+        for (open, phase, hover, want) in [
+            (false, Running, true, Capsule::Hover),
+            (false, Paused, true, Capsule::Hover),
+            (false, Running, false, Capsule::None),
+            (false, Finished, true, Capsule::TimesUp), // an alarm outranks the pointer
+            (false, Finished, false, Capsule::TimesUp),
+            (false, Idle, true, Capsule::None),        // "Done" clicked with the pointer still on the pill
+            (true, Running, true, Capsule::None),
+            (true, Finished, false, Capsule::None),
+        ] {
+            assert_eq!(Capsule::pick(open, phase, hover), want, "open={open} {phase:?} hover={hover}");
+        }
+    }
 
     /// Frames (at 60 Hz) after which the opening pill can hold the notepad, and the frame at which
     /// the spring is formally at rest; the pill's animated size is the same on every frame in
