@@ -66,6 +66,9 @@ fn note_twips(scale: f32) -> i32 {
 /// The tab row scrolls, so this is only a sanity limit (each note is one small file).
 pub const MAX_NOTES: usize = 30;
 const DEFAULT_NAME: &str = "Quick note";
+/// The "Quick note" is permanent: the note with this id (the first one ever made) cannot be
+/// deleted, even if it is renamed, and it is put back if a list is missing it.
+pub const QUICK_NOTE_ID: u64 = 1;
 
 // ------------------------------------------------------------ note list (pure)
 
@@ -105,8 +108,24 @@ fn read_note(path: &Path) -> String {
 
 impl Meta {
     fn fresh() -> Meta {
-        // id 1 is taken by the first note, so the next free id is 2
-        Meta { next_id: 2, active: 0, notes: vec![NoteMeta { id: 1, name: DEFAULT_NAME.into() }] }
+        // the Quick note takes id 1, so the next free id is 2
+        Meta { next_id: 2, active: 0, notes: vec![NoteMeta { id: QUICK_NOTE_ID, name: DEFAULT_NAME.into() }] }
+    }
+
+    /// Position of the Quick note, if the list has it.
+    pub fn quick(&self) -> Option<usize> {
+        self.notes.iter().position(|n| n.id == QUICK_NOTE_ID)
+    }
+
+    /// Puts the Quick note back, empty and first, if the list has none (a list saved before it
+    /// became permanent). `active` keeps pointing at the same note. Returns true if it was added.
+    fn ensure_quick(&mut self) -> bool {
+        if self.quick().is_some() {
+            return false;
+        }
+        self.notes.insert(0, NoteMeta { id: QUICK_NOTE_ID, name: DEFAULT_NAME.into() });
+        self.active += 1;
+        true
     }
 
     /// Loads the list from `dir`, creating it (and migrating a legacy `notes.txt`) if needed.
@@ -134,6 +153,13 @@ impl Meta {
         let mut m = meta.unwrap();
         m.active = m.active.min(m.notes.len() - 1);
         m.next_id = m.next_id.max(m.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
+        if m.ensure_quick() {
+            let p = note_path(dir, QUICK_NOTE_ID);
+            if !p.exists() {
+                let _ = write_atomic(&p, b"");
+            }
+            let _ = m.save(dir);
+        }
         m
     }
 
@@ -164,10 +190,10 @@ impl Meta {
         }
     }
 
-    /// Removes note `i` (never the last one). Returns the removed id and whether the active
-    /// note changed (so its text must be reloaded).
+    /// Removes note `i` (never the last one, and never the Quick note). Returns the removed id
+    /// and whether the active note changed (so its text must be reloaded).
     pub fn delete(&mut self, i: usize) -> Option<(u64, bool)> {
-        if self.notes.len() <= 1 || i >= self.notes.len() {
+        if self.notes.len() <= 1 || i >= self.notes.len() || self.quick() == Some(i) {
             return None;
         }
         let removed = self.notes.remove(i).id;
@@ -289,20 +315,22 @@ impl Notes {
         let _ = m.save(&self.dir);
     }
 
-    /// Deletes note `i`; the last remaining note is cleared instead.
+    /// Position of the Quick note, the one note that cannot be deleted.
+    pub fn quick(&self) -> Option<usize> {
+        self.meta.borrow().quick()
+    }
+
+    /// Deletes note `i`. Does nothing for the Quick note.
     pub fn delete(&self, i: usize) {
+        if self.quick() == Some(i) {
+            return;
+        }
         self.flush();
         let removed = self.meta.borrow_mut().delete(i);
-        match removed {
-            Some((id, was_active)) => {
-                let _ = std::fs::remove_file(note_path(&self.dir, id));
-                let _ = self.meta.borrow().save(&self.dir);
-                if was_active {
-                    self.reload();
-                }
-            }
-            None => {
-                let _ = write_atomic(&self.active_path(), b"");
+        if let Some((id, was_active)) = removed {
+            let _ = std::fs::remove_file(note_path(&self.dir, id));
+            let _ = self.meta.borrow().save(&self.dir);
+            if was_active {
                 self.reload();
             }
         }
@@ -745,8 +773,8 @@ mod tests {
         let mut m = Meta::fresh();
         m.add();
         m.add(); // [1,2,3], active = 2 (id 3)
-        let (id, was_active) = m.delete(0).unwrap();
-        assert_eq!(id, 1);
+        let (id, was_active) = m.delete(1).unwrap(); // a note before the active one
+        assert_eq!(id, 2);
         assert!(!was_active);
         assert_eq!(m.notes[m.active].id, 3);
 
@@ -761,6 +789,54 @@ mod tests {
         let mut m = Meta::fresh();
         assert!(m.delete(0).is_none());
         assert_eq!(m.notes.len(), 1);
+    }
+
+    #[test]
+    fn the_quick_note_cannot_be_removed_even_renamed_or_among_many() {
+        let mut m = Meta::fresh();
+        m.add();
+        m.add(); // [1,2,3]
+        m.rename(0, "Work"); // a new name does not make it deletable
+        assert_eq!(m.quick(), Some(0));
+        assert!(m.delete(0).is_none());
+        assert_eq!(m.notes.len(), 3);
+        assert!(m.delete(1).is_some(), "the other notes can still be deleted");
+        assert!(m.delete(1).is_some());
+        assert!(m.delete(0).is_none());
+        assert_eq!(m.notes.len(), 1);
+    }
+
+    #[test]
+    fn a_list_saved_without_the_quick_note_gets_it_back_first_and_empty() {
+        let d = tmp("noquick");
+        // what an older version left behind: the Quick note was deleted, only "Note 2" is left
+        std::fs::write(d.join("notes.json"), r#"{"next_id":39,"active":0,"notes":[{"id":38,"name":"Note 2"}]}"#).unwrap();
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        std::fs::write(note_path(&d, 38), "keep me").unwrap();
+        let m = Meta::load(&d);
+        assert_eq!(m.notes.len(), 2);
+        assert_eq!((m.notes[0].id, m.notes[0].name.as_str()), (QUICK_NOTE_ID, "Quick note"));
+        assert_eq!(m.notes[m.active].id, 38, "the open note is still the open note");
+        assert_eq!(m.next_id, 39);
+        assert_eq!(std::fs::read_to_string(note_path(&d, QUICK_NOTE_ID)).unwrap(), "");
+        assert_eq!(std::fs::read_to_string(note_path(&d, 38)).unwrap(), "keep me");
+        // it was saved, so the next start adds nothing more
+        assert_eq!(Meta::load(&d).notes.len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn deleting_the_quick_note_leaves_its_text_and_the_list_alone() {
+        let d = tmp("keepquick");
+        let n = Notes::new(d.clone());
+        std::fs::write(note_path(&d, QUICK_NOTE_ID), "my scratch text").unwrap();
+        assert!(n.add()); // a second note, so a delete is not refused just for being the last
+        n.delete(0);
+        assert_eq!(n.count(), 2);
+        assert_eq!(std::fs::read_to_string(note_path(&d, QUICK_NOTE_ID)).unwrap(), "my scratch text");
+        n.delete(1); // another note is deleted as before
+        assert_eq!(n.count(), 1);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
