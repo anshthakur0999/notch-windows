@@ -7,6 +7,7 @@
 pub mod clip_list;
 pub mod notes_view;
 pub mod pill;
+pub mod shelf_view;
 pub mod theme;
 pub mod timer_view;
 
@@ -36,22 +37,33 @@ pub const PEEK_TIMER_W: f32 = 96.0;
 /// The collapsed pill can widen into a capsule for the timer: `Hover` (cursor on it while a timer
 /// runs: notepad, pause/resume, time and clipboard buttons) and `TimesUp` (+5 min / Done).
 pub const HOVER_W: f32 = 216.0;
+/// The same capsule with a shelf button (while the shelf holds files).
+pub const HOVER_SHELF_W: f32 = 240.0;
 pub const TIMES_UP_W: f32 = 300.0;
+/// The shelf's capsules: "Drop to shelf" while a file is dragged over the pill, and the short
+/// "Added 3 files" toast after a drop.
+pub const DROP_W: f32 = 196.0;
+pub const ADDED_W: f32 = 212.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Capsule {
     None,
     Hover,
     TimesUp,
+    Drop,
+    Added,
 }
 
 impl Capsule {
-    /// The collapsed pill's shape. A finished timer outranks the pointer resting on the pill, and
-    /// the hover capsule needs a timer that is still running (`hover` stays set after "Done").
-    pub fn pick(open: bool, phase: Phase, hover: bool) -> Capsule {
+    /// The collapsed pill's shape. An alarm outranks everything; a file being dragged over the pill
+    /// outranks the "Added" toast; and the hover capsule needs a timer that is still running
+    /// (`hover` stays set after "Done").
+    pub fn pick(open: bool, phase: Phase, hover: bool, drag: bool, toast: bool) -> Capsule {
         match phase {
             _ if open => Capsule::None,
             Phase::Finished => Capsule::TimesUp,
+            _ if drag => Capsule::Drop,
+            _ if toast => Capsule::Added,
             Phase::Running | Phase::Paused if hover => Capsule::Hover,
             _ => Capsule::None,
         }
@@ -75,6 +87,16 @@ pub enum Tab {
     Notes,
     Clipboard,
     Timer,
+    Shelf,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Notes, Tab::Clipboard, Tab::Timer, Tab::Shelf];
+
+    /// The tab after this one (the Tab key).
+    pub fn next(self) -> Tab {
+        Tab::ALL[(self as usize + 1) % Tab::ALL.len()]
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +136,13 @@ pub enum Hit {
     PeekClip,
     PeekRing,
     PeekTime,
+    /// The shelf: its tab, a tile (by position), the "Drag all" handle and "Clear", and the shelf
+    /// button of the hover capsule.
+    TabShelf,
+    ShelfTile(usize),
+    ShelfDragAll,
+    ShelfClear,
+    PeekShelf,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,18 +195,35 @@ pub fn at(dx: f32, dy: f32, w: f32, h: f32) -> RectF {
 }
 
 // ---- header ----
-pub fn seg_bg() -> RectF {
-    at(6.0, 6.0, 316.0, 44.0)
+/// The header's tab segments in tab order (notepad, clipboard, timer, shelf) and the track behind them.
+pub struct Header {
+    pub bg: RectF,
+    pub seg: [RectF; 4],
 }
-pub fn seg_notes() -> RectF {
-    at(9.3, 9.3, 100.0, 37.4)
+
+impl Header {
+    pub fn of(&self, t: Tab) -> RectF {
+        self.seg[t as usize]
+    }
 }
-pub fn seg_clip() -> RectF {
-    at(113.0, 9.3, 106.0, 37.4)
-}
-/// Wide enough for "1:24:58" next to the ring.
-pub fn seg_timer() -> RectF {
-    at(222.5, 9.3, 96.0, 37.4)
+
+/// The open tab shows its label and the others just their icon, so four fit. The timer's segment
+/// stays wide while it shows a readout (wide enough for "1:24:58" next to the ring).
+pub fn header(open: Tab, timer_on: bool) -> Header {
+    let labelled = |t: Tab| match t {
+        Tab::Notes => 100.0,
+        Tab::Clipboard => 106.0,
+        Tab::Timer => 96.0,
+        Tab::Shelf => 82.0,
+    };
+    let mut x = 9.3;
+    let seg = Tab::ALL.map(|t| {
+        let w = if t == open || (t == Tab::Timer && timer_on) { labelled(t) } else { 44.0 };
+        let r = at(x, 9.3, w, 37.4);
+        x += w + 3.6;
+        r
+    });
+    Header { bg: at(6.0, 6.0, x - 3.6 + 3.3 - 6.0, 44.0), seg }
 }
 pub fn btn_pin() -> RectF {
     at(360.0, 13.0, 30.0, 30.0)
@@ -244,6 +290,8 @@ pub struct HitCtx<'a> {
     pub tabs: &'a NoteTabs,
     pub timer: Phase,
     pub capsule: Capsule,
+    /// Files on the shelf.
+    pub shelf_n: usize,
 }
 
 pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
@@ -253,19 +301,16 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
     }
     if !c.expanded {
         return match c.capsule {
-            Capsule::None => Hit::Pill,
-            Capsule::Hover => timer_view::hover_hit(pill, x, y),
+            Capsule::None | Capsule::Drop | Capsule::Added => Hit::Pill,
+            Capsule::Hover => timer_view::hover_hit(pill, x, y, c.shelf_n > 0),
             Capsule::TimesUp => timer_view::times_up_hit(pill, x, y),
         };
     }
-    if seg_notes().contains(x, y) {
-        return Hit::TabNotes;
-    }
-    if seg_clip().contains(x, y) {
-        return Hit::TabClip;
-    }
-    if seg_timer().contains(x, y) {
-        return Hit::TabTimer;
+    let tabs = header(c.tab, c.timer != Phase::Idle);
+    for (t, hit) in [(Tab::Notes, Hit::TabNotes), (Tab::Clipboard, Hit::TabClip), (Tab::Timer, Hit::TabTimer), (Tab::Shelf, Hit::TabShelf)] {
+        if tabs.of(t).contains(x, y) {
+            return hit;
+        }
     }
     if btn_pin().contains(x, y) {
         return Hit::BtnPin;
@@ -289,6 +334,11 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
         }
         Tab::Timer => {
             if let Some(hit) = timer_view::hit(x, y, c.timer) {
+                return hit;
+            }
+        }
+        Tab::Shelf => {
+            if let Some(hit) = shelf_view::hit(x, y, c.scroll, c.shelf_n) {
                 return hit;
             }
         }
@@ -323,6 +373,16 @@ pub struct View<'a> {
     /// Unix seconds, for "2 min ago" labels.
     pub now: u64,
     pub timer: TimerView<'a>,
+    pub shelf: ShelfView<'a>,
+}
+
+/// What the shelf's drawing needs this frame.
+pub struct ShelfView<'a> {
+    pub items: &'a [crate::shelf::Item],
+    /// A file drag is over the pill.
+    pub drag_over: bool,
+    /// The "Added 3 files" toast: (files added, files on the shelf).
+    pub toast: Option<(usize, usize)>,
 }
 
 /// What the timer's drawing needs this frame.
@@ -377,8 +437,20 @@ mod tests {
             (true, Running, true, Capsule::None),
             (true, Finished, false, Capsule::None),
         ] {
-            assert_eq!(Capsule::pick(open, phase, hover), want, "open={open} {phase:?} hover={hover}");
+            assert_eq!(Capsule::pick(open, phase, hover, false, false), want, "open={open} {phase:?} hover={hover}");
         }
+    }
+
+    #[test]
+    fn a_drag_over_the_pill_outranks_the_toast_and_the_hover_but_not_an_alarm() {
+        use Phase::*;
+        // (open, phase, hover, drag, toast)
+        assert_eq!(Capsule::pick(false, Idle, false, true, false), Capsule::Drop);
+        assert_eq!(Capsule::pick(false, Running, true, true, true), Capsule::Drop, "a drag beats the toast and the hover");
+        assert_eq!(Capsule::pick(false, Idle, false, false, true), Capsule::Added);
+        assert_eq!(Capsule::pick(false, Running, true, false, true), Capsule::Added, "the toast beats the hover");
+        assert_eq!(Capsule::pick(false, Finished, false, true, true), Capsule::TimesUp, "an alarm beats everything");
+        assert_eq!(Capsule::pick(true, Idle, false, true, true), Capsule::None, "the open panel has no capsule");
     }
 
     /// Frames (at 60 Hz) after which the opening pill can hold the notepad, and the frame at which

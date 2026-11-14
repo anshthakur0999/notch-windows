@@ -32,15 +32,19 @@ pub fn hline(r: &Renderer, y: f32, alpha: f32) {
     r.fill_rect(RectF { l: p.l + 6.0, t: y, r: p.r - 6.0, b: y + 1.0 }.d2d(), color(r.pal.rule, alpha));
 }
 
-/// "[Esc] to collapse" at the right end of a footer whose centre line is `cy`.
-pub fn collapse_hint(r: &Renderer, cy: f32, alpha: f32) {
+/// "[key] label" at the right end of a footer whose centre line is `cy`.
+pub fn key_hint(r: &Renderer, key: &str, label: &str, cy: f32, alpha: f32) {
     let p = exp();
-    let label = "to collapse";
     let lw = r.text_w(F::Hint, label);
     let label_l = p.r - 20.0 - lw;
     r.text(label, F::Hint, RectF { l: label_l, t: cy - 9.0, r: label_l + lw + 4.0, b: cy + 9.0 }.d2d(), color(r.pal.muted, alpha));
-    let key_w = keycap_width(r, "Esc");
-    keycap(r, "Esc", label_l - 7.0 - key_w, cy, alpha);
+    let key_w = keycap_width(r, key);
+    keycap(r, key, label_l - 7.0 - key_w, cy, alpha);
+}
+
+/// "[Esc] to collapse".
+pub fn collapse_hint(r: &Renderer, cy: f32, alpha: f32) {
+    key_hint(r, "Esc", "to collapse", cy, alpha);
 }
 
 pub fn keycap_width(r: &Renderer, text: &str) -> f32 {
@@ -79,12 +83,12 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     // The collapsed indicator (a faint dash) gives way to the peek's badge.
     // (and it only comes back once the text has gone too, so it never shows through "Copied")
     let dash_gone = peek.map_or(0.0, |p| (p.look.icon + p.look.old_icon).max(p.look.label).max(p.look.line).min(1.0));
-    // a running timer takes the dash's place on the resting pill; the capsules cover it
-    let timer_rests = v.timer.active() && peek.is_none() && v.timer.capsule == Capsule::None;
-    let dash = if timer_rests || v.timer.capsule != Capsule::None { 0.0 } else { 1.0 - dash_gone };
+    // a running timer or files on the shelf take the dash's place on the resting pill; the capsules cover it
+    let chips = (v.timer.active() || !v.shelf.items.is_empty()) && peek.is_none() && v.timer.capsule == Capsule::None;
+    let dash = if chips || v.timer.capsule != Capsule::None { 0.0 } else { 1.0 - dash_gone };
     draw_body(r, pill, rad, t, body_a, dash);
-    if timer_rests {
-        timer_view::draw_resting(r, v, pill, (1.0 - t * 4.0).clamp(0.0, 1.0));
+    if chips {
+        shelf_view::draw_resting(r, v, pill, (1.0 - t * 4.0).clamp(0.0, 1.0));
     }
 
     if let Some(p) = peek {
@@ -93,6 +97,8 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     match v.timer.capsule {
         Capsule::Hover => timer_view::draw_hover(r, v, pill),
         Capsule::TimesUp => timer_view::draw_times_up(r, v, pill),
+        Capsule::Drop => shelf_view::draw_drop(r, pill),
+        Capsule::Added => shelf_view::draw_added(r, v, pill),
         Capsule::None => {}
     }
 
@@ -106,6 +112,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
             Tab::Notes => notes_view::draw(r, v, alpha),
             Tab::Clipboard => clip_list::draw(r, v, alpha),
             Tab::Timer => timer_view::draw(r, v, alpha),
+            Tab::Shelf => shelf_view::draw(r, v, alpha),
         }
         r.pop_clip();
     }
@@ -223,16 +230,18 @@ fn draw_badge(r: &mut Renderer, v: &View, thumb: Option<u64>, cx: f32, cy: f32, 
 
 fn draw_header(r: &Renderer, v: &View, alpha: f32) {
     let pal = r.pal;
-    let bg = seg_bg();
-    r.fill_rrect(bg.d2d(), bg.h() / 2.0, color(pal.seg, alpha));
+    let hd = header(v.tab, v.timer.phase != crate::timer::Phase::Idle);
+    r.fill_rrect(hd.bg.d2d(), hd.bg.h() / 2.0, color(pal.seg, alpha));
 
-    // (rect, label, glyph, tab, hit, accent)
-    let segments = [
-        (seg_notes(), "Notepad", '\u{E8A5}', Tab::Notes, Hit::TabNotes, pal.notes),
-        (seg_clip(), "Clipboard", '\u{E77F}', Tab::Clipboard, Hit::TabClip, pal.clip),
-        (seg_timer(), "Timer", '\u{E916}', Tab::Timer, Hit::TabTimer, pal.timer),
+    // (label, icon, tab, hit, accent); the shelf's icon is drawn, not a glyph
+    let tabs = [
+        ("Notepad", Some('\u{E8A5}'), Tab::Notes, Hit::TabNotes, pal.notes),
+        ("Clipboard", Some('\u{E77F}'), Tab::Clipboard, Hit::TabClip, pal.clip),
+        ("Timer", Some('\u{E916}'), Tab::Timer, Hit::TabTimer, pal.timer),
+        ("Shelf", None, Tab::Shelf, Hit::TabShelf, pal.shelf),
     ];
-    for (rect, label, glyph, tab, hit, accent) in segments {
+    for (label, glyph, tab, hit, accent) in tabs {
+        let rect = hd.of(tab);
         let active = v.tab == tab;
         if active {
             r.fill_rrect(rect.d2d(), rect.h() / 2.0, color(pal.seg_active(accent), alpha));
@@ -240,14 +249,21 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
             r.fill_rrect(rect.d2d(), rect.h() / 2.0, color(pal.wash, 0.05 * alpha));
         }
         if tab == Tab::Timer {
-            // "Timer" while idle; the time left while timing, whichever tab is open
+            // the time left while timing, whichever tab is open
             timer_view::draw_segment(r, v, rect, active, v.hover == hit, alpha);
             continue;
         }
         let fg = if active { accent } else if v.hover == hit { pal.text2 } else { pal.muted };
-        r.glyph(glyph, F::Icon16, rect.l + 22.0, rect.cy(), color(fg, alpha));
-        let text = RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b };
-        r.text(label, F::Seg, text.d2d(), color(fg, alpha));
+        // only the open tab shows its name; the others are just the icon
+        let x = if active { rect.l + 22.0 } else { rect.cx() };
+        match glyph {
+            Some(g) => r.glyph(g, F::Icon16, x, rect.cy(), color(fg, alpha)),
+            None => r.tray(x, rect.cy(), 16.0, color(fg, alpha)),
+        }
+        if active {
+            let text = RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b };
+            r.text(label, F::Seg, text.d2d(), color(fg, alpha));
+        }
     }
 
     // keep-open pin and collapse chevron

@@ -17,12 +17,14 @@ use crate::store::{Kind, Store, now_secs};
 use crate::ui::clip_list::{self, ListLayout};
 use crate::ui::theme::Palette;
 use crate::ui::notes_view::{self, NoteTabs};
+use crate::shelf::Shelf;
 use crate::timer::{self, Phase, Timer};
 use crate::ui::timer_view::PRESETS;
 use crate::ui::{
-    self, COLLAPSED_H, COLLAPSED_W, Capsule, EXPANDED_H, EXPANDED_W, HOVER_W, Hit, HitCtx, PEEK_H, PEEK_TIMER_W, PeekView,
-    TIMES_UP_W, Tab, TimerField, TimerView, View, WIN_H, WIN_W,
+    self, COLLAPSED_H, COLLAPSED_W, Capsule, EXPANDED_H, EXPANDED_W, ADDED_W, DROP_W, HOVER_SHELF_W, HOVER_W, Hit, HitCtx, PEEK_H, PEEK_TIMER_W, PeekView,
+    ShelfView, TIMES_UP_W, Tab, TimerField, TimerView, View, WIN_H, WIN_W,
 };
+use crate::ui::shelf_view;
 use crate::window;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -44,6 +46,7 @@ pub const WM_APP_FOCUSCHECK: u32 = WM_APP + 3;
 pub const WM_APP_FGCHANGE: u32 = WM_APP + 4;
 /// Sent by `notch.exe hide|show|toggle|quit`; `wParam` is a `cli::CMD_*` code.
 pub const WM_APP_COMMAND: u32 = WM_APP + 5;
+pub const WM_APP_THUMB: u32 = WM_APP + 6;
 
 // All timers are one-shot: nothing ticks while the pill is idle.
 const T_DWELL: usize = 1;
@@ -55,6 +58,8 @@ const T_PASTE: usize = 5;
 const T_PEEK: usize = 6;
 /// The timer's displayed second is about to change (or its time is up).
 const T_TIMER: usize = 7;
+/// The "Added 3 files" toast has been up long enough.
+const T_SHELF: usize = 8;
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -161,6 +166,14 @@ pub struct App {
     /// When "stop" or "Done" was clicked: the form appears under the pointer, so a double-click
     /// must not press "Start" with its second click.
     last_timer_stop: Cell<Option<Instant>>,
+    /// The file shelf, and what the pill is doing about it: a file drag is over the pill, our own
+    /// drag out is in progress (the pill must not take its own files back), the "Added" toast
+    /// (files dropped, files on the shelf), and a press on a tile that may turn into a drag.
+    shelf: RefCell<Shelf>,
+    drag_over: Cell<bool>,
+    dragging_out: Cell<bool>,
+    shelf_toast: Cell<Option<(usize, usize)>>,
+    press: Cell<Option<(Hit, i32, i32)>>,
 
     renderer: RefCell<Option<Renderer>>,
     pub store: RefCell<Store>,
@@ -191,6 +204,10 @@ impl App {
         renderer.set_look(pal, scale);
         let notes = Notes::new(dir.clone());
         notes.set_style(NoteStyle::new(&pal, scale));
+        let mut shelf = Shelf::load(&dir);
+        if shelf.prune(settings.shelf_hours, now_secs()) {
+            let _ = shelf.save(&dir);
+        }
         let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
         Ok(App {
             hwnd,
@@ -233,6 +250,11 @@ impl App {
             hover_peek: Cell::new(false),
             peek_slot: Cell::new(0.0),
             last_timer_stop: Cell::new(None),
+            shelf: RefCell::new(shelf),
+            drag_over: Cell::new(false),
+            dragging_out: Cell::new(false),
+            shelf_toast: Cell::new(None),
+            press: Cell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
             notes,
@@ -275,6 +297,7 @@ impl App {
         *self.tooltip.borrow_mut() = tip;
         shell::add_tray(self.hwnd, WM_APP_TRAY, &self.tooltip.borrow());
         self.fg_hook.set(shell::install_foreground_hook(self.hwnd));
+        crate::dnd::register(self.hwnd);
     }
 
     pub fn is_animating(&self) -> bool {
@@ -636,14 +659,22 @@ impl App {
     /// The collapsed pill's shape: a capsule while the time is up, or while the cursor rests on it
     /// with a timer running; the plain pill otherwise.
     fn capsule(&self) -> Capsule {
-        Capsule::pick(self.open.get(), self.timer.borrow().phase(), self.hover_peek.get())
+        Capsule::pick(
+            self.open.get(),
+            self.timer.borrow().phase(),
+            self.hover_peek.get(),
+            self.drag_over.get(),
+            self.shelf_toast.get().is_some(),
+        )
     }
 
     /// The size the pill rests at while it is not open.
     fn rest_size(&self) -> (f32, f32) {
         match self.capsule() {
             Capsule::TimesUp => (TIMES_UP_W, PEEK_H),
-            Capsule::Hover => (HOVER_W, PEEK_H),
+            Capsule::Hover => (if self.shelf.borrow().len() > 0 { HOVER_SHELF_W } else { HOVER_W }, PEEK_H),
+            Capsule::Drop => (DROP_W, PEEK_H),
+            Capsule::Added => (ADDED_W, PEEK_H),
             Capsule::None => (COLLAPSED_W, COLLAPSED_H),
         }
     }
@@ -759,6 +790,201 @@ impl App {
         }
     }
 
+    // ----------------------------------------------------------------- shelf
+
+    fn save_shelf(&self) {
+        if let Err(e) = self.shelf.borrow().save(&data_dir()) {
+            crate::log(&format!("could not save the shelf: {e}"));
+        }
+    }
+
+    /// Drops files held longer than the `shelf_hours` setting. True if any went.
+    fn shelf_prune(&self) -> bool {
+        let hours = self.cfg().shelf_hours;
+        let changed = self.shelf.borrow_mut().prune(hours, now_secs());
+        if changed {
+            self.save_shelf();
+        }
+        changed
+    }
+
+    /// Re-reads what the tiles show (size, still there?) as the Shelf tab is about to be seen.
+    fn shelf_refresh(&self) {
+        self.shelf_prune();
+        self.shelf.borrow_mut().refresh();
+        self.clamp_shelf_scroll();
+        self.request_thumbs();
+    }
+
+    /// Asks the shell for a preview of every file on the shelf that has not been asked for yet.
+    fn request_thumbs(&self) {
+        let mut guard = self.renderer.borrow_mut();
+        let Some(r) = guard.as_mut() else { return };
+        let want: Vec<String> = {
+            let shelf = self.shelf.borrow();
+            shelf.items().iter().filter(|i| !i.missing).filter(|i| r.shelf_asked.insert(i.path.clone())).map(|i| i.path.clone()).collect()
+        };
+        if !want.is_empty() {
+            crate::thumbs::request(self.hwnd, WM_APP_THUMB, want);
+        }
+    }
+
+    /// `WM_APP_THUMB`: previews arrived; the open Shelf tab shows them.
+    fn on_thumbs(&self) {
+        if let Some(r) = self.renderer.borrow_mut().as_mut() {
+            crate::thumbs::take().into_iter().for_each(|t| r.add_shelf_thumb(t));
+        }
+        if self.open.get() && self.tab.get() == Tab::Shelf {
+            self.invalidate();
+        }
+    }
+
+    fn clamp_shelf_scroll(&self) {
+        let max = shelf_view::max_scroll(self.shelf.borrow().len());
+        self.scroll.set(self.scroll.get().clamp(0.0, max));
+    }
+
+    /// Files can be dropped on the pill, unless it is hidden or the drag is our own.
+    pub fn drag_accepts(&self) -> bool {
+        !self.dragging_out.get() && !self.is_hidden()
+    }
+
+    /// A file drag entered (`over`) or left the pill: it widens into "Drop to shelf". Returns
+    /// whether the files would be taken.
+    pub fn on_drag(&self, over: bool) -> bool {
+        if over && !self.drag_accepts() {
+            return false;
+        }
+        if self.drag_over.replace(over) != over {
+            if !self.open.get() {
+                self.peek_clear();
+                self.settle_capsule();
+            }
+            self.invalidate();
+        }
+        over
+    }
+
+    /// Files were dropped on the pill: they go on the shelf. With the panel open it shows them; with
+    /// the pill collapsed a short toast says so.
+    pub fn on_drop(&self, files: Vec<String>) -> bool {
+        if self.dragging_out.get() || files.is_empty() {
+            self.on_drag(false);
+            return false;
+        }
+        self.drag_over.set(false);
+        let total = {
+            let mut s = self.shelf.borrow_mut();
+            s.add(&files, now_secs());
+            s.len()
+        };
+        self.save_shelf();
+        self.scroll.set(0.0);
+        if self.open.get() {
+            self.set_tab(Tab::Shelf);
+            self.request_thumbs();
+        } else {
+            self.shelf_toast.set(Some((files.len(), total)));
+            unsafe {
+                SetTimer(Some(self.hwnd), T_SHELF, 2400, None);
+            }
+            self.peek_clear();
+            self.settle_capsule();
+        }
+        self.invalidate();
+        true
+    }
+
+    /// Takes the "Added" toast down.
+    fn shelf_toast_clear(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), T_SHELF);
+        }
+        if self.shelf_toast.replace(None).is_some() {
+            self.settle_capsule();
+            self.invalidate();
+        }
+    }
+
+    /// A click on a tile (ticks it, or removes a missing one by its x) or on "Clear".
+    fn on_shelf_click(&self, hit: Hit, x: f32, y: f32) {
+        match hit {
+            Hit::ShelfTile(i) => {
+                let (bx, by) = shelf_view::badge(shelf_view::tile(i, self.scroll.get()));
+                let mut shelf = self.shelf.borrow_mut();
+                if shelf.items().get(i).is_some_and(|it| it.missing) {
+                    if (x - bx).hypot(y - by) <= 13.0 {
+                        shelf.remove(i);
+                        drop(shelf);
+                        self.save_shelf();
+                    }
+                } else {
+                    shelf.toggle(i);
+                }
+            }
+            Hit::ShelfClear => {
+                self.shelf.borrow_mut().clear();
+                self.save_shelf();
+            }
+            _ => return,
+        }
+        self.clamp_shelf_scroll();
+        self.refresh_hover();
+        self.invalidate();
+    }
+
+    /// The button went down: on a tile (or "Drag all") that may be the start of a drag out.
+    fn on_press(&self, px: i32, py: i32) {
+        self.press.set(None);
+        if !self.expanded() {
+            return;
+        }
+        let hit = self.hit_at(self.to_dip(px), self.to_dip(py));
+        if matches!(hit, Hit::ShelfTile(_) | Hit::ShelfDragAll) {
+            self.press.set(Some((hit, px, py)));
+        }
+    }
+
+    /// The pointer moved with the button held: far enough from where it went down and it is a drag.
+    fn maybe_start_drag(&self, px: i32, py: i32) {
+        let Some((hit, x0, y0)) = self.press.get() else { return };
+        let (dx, dy) = unsafe { (GetSystemMetrics(SM_CXDRAG).max(4), GetSystemMetrics(SM_CYDRAG).max(4)) };
+        if (px - x0).abs() >= dx || (py - y0).abs() >= dy {
+            self.press.set(None);
+            self.start_drag_out(hit);
+        }
+    }
+
+    /// Drags the files of a tile (the ticked ones, if it is one of them) or all of them out to
+    /// whatever the user drops them on. Blocks until the button is released. The panel shrinks to
+    /// the pill first, so it does not cover the target.
+    fn start_drag_out(&self, hit: Hit) {
+        let files = {
+            let shelf = self.shelf.borrow();
+            match hit {
+                Hit::ShelfTile(i) => shelf.drag_set(i),
+                Hit::ShelfDragAll => shelf.all_present(),
+                _ => Vec::new(),
+            }
+        };
+        if files.is_empty() {
+            return;
+        }
+        crate::log(&format!("drag out: {} file(s)", files.len()));
+        self.dragging_out.set(true);
+        self.collapse();
+        let (mut w, mut h) = (self.w.get(), self.h.get());
+        w.snap();
+        h.snap();
+        self.w.set(w);
+        self.h.set(h);
+        window::set_region(self.hwnd, self.dpi.get(), w.pos, h.pos);
+        self.render();
+        let took = crate::dnd::drag_out(&files);
+        crate::log(&format!("drag out finished: took={took}"));
+        self.dragging_out.set(false);
+    }
+
     // --------------------------------------------------------------- render
 
     pub fn invalidate(&self) {
@@ -771,6 +997,7 @@ impl App {
         if self.is_hidden() {
             return;
         }
+        self.shelf_prune(); // so the count never shows a file that has expired
         let failed = {
             let mut guard = self.renderer.borrow_mut();
             let Some(r) = guard.as_mut() else { return };
@@ -792,6 +1019,7 @@ impl App {
                 look: p.look(w, Instant::now()),
             });
             let timer = self.timer.borrow();
+            let shelf = self.shelf.borrow();
             let (timer_input, timer_label) = (self.timer_input.borrow(), self.timer_label.borrow());
             let (tnow, parsed) = (Instant::now(), timer::parse(&timer_input));
             let ends = shell::clock_after(if timer.phase() == Phase::Idle { parsed.unwrap_or(0) } else { timer.left_secs(tnow) });
@@ -828,6 +1056,7 @@ impl App {
                     capsule: self.capsule(),
                     peek_slot: self.peek_slot.get(),
                 },
+                shelf: ShelfView { items: shelf.items(), drag_over: self.drag_over.get(), toast: self.shelf_toast.get() },
             };
             match ui::pill::draw(r, &view) {
                 Ok(()) => false,
@@ -940,6 +1169,10 @@ impl App {
         }
         self.peek_clear(); // the springs carry on from wherever the capsule was
         self.hover_peek.set(false);
+        self.shelf_toast_clear();
+        if self.tab.get() == Tab::Shelf {
+            self.shelf_refresh();
+        }
         self.open.set(true);
         self.relayout_tabs(true); // show the active note's tab even if the row is scrolled elsewhere
         self.set_targets(EXPANDED_W, EXPANDED_H);
@@ -1045,6 +1278,9 @@ impl App {
         self.scroll.set(0.0);
         self.hover.set(Hit::None);
         self.sel.set(None);
+        if t == Tab::Shelf {
+            self.shelf_refresh();
+        }
         if t == Tab::Notes {
             if self.expanded() {
                 self.show_notes();
@@ -1138,6 +1374,7 @@ impl App {
                 tabs: tabs.as_ref().unwrap_or(&empty),
                 timer: self.timer.borrow().phase(),
                 capsule: self.capsule(),
+                shelf_n: self.shelf.borrow().len(),
             },
         )
     }
@@ -1238,9 +1475,11 @@ impl App {
             match self.hit_at(x, y) {
                 // the time's-up capsule opens the Timer tab; the plain pill and the hover capsule, the panel
                 Hit::Pill if self.capsule() == Capsule::TimesUp => self.open_sticky(Some(Tab::Timer)),
+                Hit::Pill if self.capsule() == Capsule::Added => self.open_sticky(Some(Tab::Shelf)),
                 Hit::Pill => self.open_sticky(None),
                 Hit::PeekNotes => self.open_sticky(Some(Tab::Notes)),
                 Hit::PeekClip => self.open_sticky(Some(Tab::Clipboard)),
+                Hit::PeekShelf => self.open_sticky(Some(Tab::Shelf)),
                 Hit::PeekTime => self.open_sticky(Some(Tab::Timer)),
                 Hit::PeekRing => self.timer_pause_toggle(),
                 h @ (Hit::TimerDone | Hit::TimerAdd5) => self.on_timer_click(h),
@@ -1252,6 +1491,8 @@ impl App {
             Hit::TabNotes => self.set_tab(Tab::Notes),
             Hit::TabClip => self.set_tab(Tab::Clipboard),
             Hit::TabTimer => self.set_tab(Tab::Timer),
+            Hit::TabShelf => self.set_tab(Tab::Shelf),
+            h @ (Hit::ShelfTile(_) | Hit::ShelfClear | Hit::ShelfDragAll) => self.on_shelf_click(h, x, y),
             h @ (Hit::TimerField
             | Hit::TimerLabel
             | Hit::TimerPreset(_)
@@ -1353,6 +1594,14 @@ impl App {
             // the notepad's own text scrolls itself; over the pill's chrome the wheel moves the
             // note tabs (wheel down = further right)
             self.scroll_tabs(-(delta as f32) / 120.0 * 72.0);
+            return;
+        }
+        if self.expanded() && self.tab.get() == Tab::Shelf {
+            let max = shelf_view::max_scroll(self.shelf.borrow().len());
+            self.scroll.set((self.scroll.get() - delta as f32 / 120.0 * 60.0).clamp(0.0, max));
+            let (x, y) = self.mouse.get();
+            self.hover.set(self.hit_at(x, y));
+            self.invalidate();
             return;
         }
         if !self.expanded() || self.tab.get() != Tab::Clipboard {
@@ -1462,7 +1711,7 @@ impl App {
         }
     }
 
-    /// Keys the pill itself handles: Esc, Tab, and Enter on the timer's form. (The clipboard list
+    /// Keys the pill itself handles: Esc, Tab, Enter on the timer's form and Del on the shelf. (The clipboard list
     /// is driven with the mouse or trackpad; typing goes to a text box through `on_char`.)
     fn on_key(&self, vk: u32) {
         match VIRTUAL_KEY(vk as u16) {
@@ -1475,12 +1724,14 @@ impl App {
                 }
             }
             VK_TAB => {
-                let next = match self.tab.get() {
-                    Tab::Notes => Tab::Clipboard,
-                    Tab::Clipboard => Tab::Timer,
-                    Tab::Timer => Tab::Notes,
-                };
-                self.set_tab(next);
+                self.set_tab(self.tab.get().next());
+            }
+            VK_DELETE if self.expanded() && self.tab.get() == Tab::Shelf => {
+                self.shelf.borrow_mut().remove_selected();
+                self.save_shelf();
+                self.clamp_shelf_scroll();
+                self.refresh_hover();
+                self.invalidate();
             }
             VK_RETURN if self.expanded() && self.tab.get() == Tab::Timer && self.timer.borrow().phase() == Phase::Idle => {
                 self.start_timer();
@@ -1773,6 +2024,7 @@ impl App {
             }
             T_PEEK => self.peek_hold_over(),
             T_TIMER => self.timer_tick(),
+            T_SHELF => self.shelf_toast_clear(),
             T_FS => self.update_fullscreen(),
             T_PASTE => {
                 crate::log(&format!("send Ctrl+V; foreground={:?}", unsafe { GetForegroundWindow() }));
@@ -1992,10 +2244,12 @@ impl App {
 
     fn cleanup(&self) {
         self.notes.flush();
+        self.save_shelf();
         let _ = self.store.borrow().save();
         unsafe {
             let _ = RemoveClipboardFormatListener(self.hwnd);
         }
+        crate::dnd::unregister(self.hwnd);
         shell::unregister_hotkeys(self.hwnd);
         shell::remove_tray(self.hwnd);
         shell::remove_foreground_hook(self.fg_hook.get());
@@ -2021,8 +2275,16 @@ impl App {
                         DefWindowProcW(hwnd, msg, wp, lp)
                     }
                 }
+                WM_LBUTTONDOWN => {
+                    let (x, y) = window::mouse_xy(lp);
+                    self.on_press(x, y);
+                    LRESULT(0)
+                }
                 WM_MOUSEMOVE => {
                     let (x, y) = window::mouse_xy(lp);
+                    if wp.0 & 1 != 0 {
+                        self.maybe_start_drag(x, y); // MK_LBUTTON
+                    }
                     self.on_mouse_move(x, y);
                     LRESULT(0)
                 }
@@ -2032,6 +2294,7 @@ impl App {
                 }
                 WM_LBUTTONUP => {
                     let (x, y) = window::mouse_xy(lp);
+                    self.press.set(None);
                     self.on_click(x, y, key_down(VK_SHIFT));
                     LRESULT(0)
                 }
@@ -2080,6 +2343,10 @@ impl App {
                 }
                 WM_APP_CLIPDONE => {
                     clipboard::on_image_done(self);
+                    LRESULT(0)
+                }
+                WM_APP_THUMB => {
+                    self.on_thumbs();
                     LRESULT(0)
                 }
                 WM_COMMAND => {

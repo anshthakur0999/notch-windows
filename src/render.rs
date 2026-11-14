@@ -3,7 +3,7 @@
 //! This gives per-pixel transparency without a layered window and without a CPU copy.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use windows::Win32::Foundation::*;
@@ -48,6 +48,9 @@ pub enum F {
     Clock,
     ClockSm,
     Field,
+    /// The shelf: a heading, and the big file glyph on a tile.
+    Head,
+    Icon24,
 }
 
 pub struct Fonts {
@@ -65,11 +68,18 @@ pub struct Renderer {
     dw: IDWriteFactory,
     fonts: Fonts,
     stroke: ID2D1StrokeStyle,
+    /// Round-capped dashes for the shelf's drop targets.
+    dash: ID2D1StrokeStyle,
     pin_geom: ID2D1PathGeometry,
+    tray_geom: ID2D1PathGeometry,
     widths: RefCell<HashMap<(u8, String), f32>>,
     wic: Option<IWICImagingFactory>,
     /// Decoded thumbnails, only kept while the pill is open.
     pub thumbs: HashMap<u64, ID2D1Bitmap1>,
+    /// Previews of the shelf's files by path (`true`: a file icon, not a thumbnail), and the paths
+    /// already asked for. Only kept while the pill is open.
+    pub shelf_tex: HashMap<String, (ID2D1Bitmap1, bool)>,
+    pub shelf_asked: HashSet<String>,
     dpi: f32,
     /// The current colours and the scale of the clipboard-entry text (see `set_look`).
     pub pal: Palette,
@@ -176,7 +186,22 @@ impl Renderer {
                 None,
             )?;
             let stroke: ID2D1StrokeStyle = stroke1.cast()?;
+            let dash1 = d2d.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES1 {
+                    startCap: D2D1_CAP_STYLE_FLAT,
+                    endCap: D2D1_CAP_STYLE_FLAT,
+                    dashCap: D2D1_CAP_STYLE_FLAT,
+                    lineJoin: D2D1_LINE_JOIN_ROUND,
+                    miterLimit: 10.0,
+                    dashStyle: D2D1_DASH_STYLE_CUSTOM,
+                    dashOffset: 0.0,
+                    transformType: D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+                },
+                Some(&[3.0, 2.2]), // in stroke widths
+            )?;
+            let dash: ID2D1StrokeStyle = dash1.cast()?;
             let pin_geom = make_pin_geometry(&d2d)?;
+            let tray_geom = make_tray_geometry(&d2d)?;
 
             let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let fonts = make_fonts(&dw, 1.0)?;
@@ -192,10 +217,14 @@ impl Renderer {
                 dw,
                 fonts,
                 stroke,
+                dash,
                 pin_geom,
+                tray_geom,
                 widths: RefCell::new(HashMap::new()),
                 wic: None,
                 thumbs: HashMap::new(),
+                shelf_tex: HashMap::new(),
+                shelf_asked: HashSet::new(),
                 dpi,
                 pal: Palette::default(),
                 text_scale: 1.0,
@@ -289,6 +318,19 @@ impl Renderer {
                 &self.brush,
                 width,
                 None,
+            );
+        }
+    }
+
+    /// A dashed rounded outline (a place to drop things).
+    pub fn dashed_rrect(&self, r: D2D_RECT_F, radius: f32, c: D2D1_COLOR_F, width: f32) {
+        unsafe {
+            self.brush.SetColor(&c);
+            self.dc.DrawRoundedRectangle(
+                &D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius },
+                &self.brush,
+                width,
+                Some(&self.dash),
             );
         }
     }
@@ -497,6 +539,18 @@ impl Renderer {
         }
     }
 
+    /// The shelf's tray icon centred on (cx, cy), `size` DIPs square.
+    pub fn tray(&self, cx: f32, cy: f32, size: f32, c: D2D1_COLOR_F) {
+        let s = size / 16.0;
+        let m = Matrix3x2 { M11: s, M12: 0.0, M21: 0.0, M22: s, M31: cx - size / 2.0, M32: cy - size / 2.0 };
+        unsafe {
+            self.brush.SetColor(&c);
+            self.dc.SetTransform(&m);
+            self.dc.DrawGeometry(&self.tray_geom, &self.brush, 1.3, Some(&self.stroke));
+            self.dc.SetTransform(&Matrix3x2::identity());
+        }
+    }
+
     /// Upward chevron (collapse button).
     pub fn chevron_up(&self, cx: f32, cy: f32, half: f32, c: D2D1_COLOR_F) {
         let h = half * 0.55;
@@ -583,9 +637,29 @@ impl Renderer {
         }
     }
 
+    /// Uploads a shelf preview the worker finished (ignored if the pill has closed since).
+    pub fn add_shelf_thumb(&mut self, t: crate::thumbs::Thumb) {
+        if !self.shelf_asked.contains(&t.path) {
+            return;
+        }
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U { width: t.w, height: t.h };
+        if let Ok(bmp) = unsafe { self.dc.CreateBitmap(size, Some(t.px.as_ptr().cast()), t.w * 4, &props) } {
+            self.shelf_tex.insert(t.path, (bmp, t.icon));
+        }
+    }
+
     /// Drops GPU thumbnails and the WIC factory so a closed pill holds no extra memory.
     pub fn release_transient(&mut self) {
         self.thumbs.clear();
+        self.shelf_tex.clear();
+        self.shelf_asked.clear();
         self.wic = None;
     }
 }
@@ -601,6 +675,28 @@ fn make_pin_geometry(d2d: &ID2D1Factory1) -> Result<ID2D1PathGeometry> {
             sink.AddLine(Vector2 { X: p.0, Y: p.1 });
         }
         sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close()?;
+        geom.cast::<ID2D1PathGeometry>()
+    }
+}
+
+/// An open tray (an inbox) on a 16 x 16 grid: the box, and the dip of its front edge.
+fn make_tray_geometry(d2d: &ID2D1Factory1) -> Result<ID2D1PathGeometry> {
+    unsafe {
+        let geom = d2d.CreatePathGeometry()?;
+        let sink = geom.Open()?;
+        let figure = |pts: &[(f32, f32)], end: D2D1_FIGURE_END| {
+            sink.BeginFigure(Vector2 { X: pts[0].0, Y: pts[0].1 }, D2D1_FIGURE_BEGIN_HOLLOW);
+            for p in &pts[1..] {
+                sink.AddLine(Vector2 { X: p.0, Y: p.1 });
+            }
+            sink.EndFigure(end);
+        };
+        figure(
+            &[(1.6, 8.2), (3.8, 3.4), (5.0, 2.6), (11.0, 2.6), (12.2, 3.4), (14.4, 8.2), (14.4, 12.0), (13.0, 13.4), (3.0, 13.4), (1.6, 12.0)],
+            D2D1_FIGURE_END_CLOSED,
+        );
+        figure(&[(1.6, 8.2), (5.2, 8.2), (6.4, 10.4), (9.6, 10.4), (10.8, 8.2), (14.4, 8.2)], D2D1_FIGURE_END_OPEN);
         sink.Close()?;
         geom.cast::<ID2D1PathGeometry>()
     }
@@ -672,6 +768,8 @@ fn make_fonts(dw: &IDWriteFactory, k: f32) -> Result<Fonts> {
         make_format(dw, ui, 46.0, sb, true)?,       // Clock
         make_format(dw, ui, 12.5, sb, true)?,       // ClockSm
         make_format(dw, ui, 32.0, sb, false)?,      // Field
+        make_format(dw, ui, 22.0, sb, true)?,       // Head
+        make_format(dw, icons, 24.0, n, true)?,     // Icon24
     ];
     Ok(Fonts { v })
 }

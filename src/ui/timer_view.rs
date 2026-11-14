@@ -93,23 +93,36 @@ pub fn hit(x: f32, y: f32, phase: Phase) -> Option<Hit> {
 
 // ---------------------------------------------------------------- capsule geometry
 
-/// The hover capsule, laid out from the capsule's own rectangle `p`: notepad button, pause / resume
-/// ring, the time, clipboard button.
+/// The hover capsule, laid out from the capsule's own rectangle `p`. Without the shelf: notepad
+/// button, pause / resume ring, the time, clipboard button. With files on the shelf the capsule is
+/// wider and reads: notepad, clipboard, shelf, ring, time.
 struct HoverLayout {
     notes: (f32, f32),
     ring: (f32, f32),
     time: RectF,
     clip: (f32, f32),
+    shelf: Option<(f32, f32)>,
 }
 const BTN_R: f32 = 17.0;
 
-fn hover_layout(p: RectF) -> HoverLayout {
+fn hover_layout(p: RectF, shelf: bool) -> HoverLayout {
     let cy = p.cy();
-    HoverLayout {
-        notes: (p.l + 23.0, cy),
-        ring: (p.l + 63.0, cy),
-        time: RectF { l: p.l + 84.0, t: p.t, r: p.l + 166.0, b: p.b },
-        clip: (p.r - 23.0, cy),
+    if shelf {
+        HoverLayout {
+            notes: (p.l + 23.0, cy),
+            clip: (p.l + 63.0, cy),
+            shelf: Some((p.l + 103.0, cy)),
+            ring: (p.l + 143.0, cy),
+            time: RectF { l: p.l + 164.0, t: p.t, r: p.r - 6.0, b: p.b },
+        }
+    } else {
+        HoverLayout {
+            notes: (p.l + 23.0, cy),
+            ring: (p.l + 63.0, cy),
+            time: RectF { l: p.l + 84.0, t: p.t, r: p.l + 166.0, b: p.b },
+            clip: (p.r - 23.0, cy),
+            shelf: None,
+        }
     }
 }
 
@@ -117,10 +130,12 @@ fn within(c: (f32, f32), r: f32, x: f32, y: f32) -> bool {
     (x - c.0).hypot(y - c.1) <= r
 }
 
-pub fn hover_hit(p: RectF, x: f32, y: f32) -> Hit {
-    let l = hover_layout(p);
+pub fn hover_hit(p: RectF, x: f32, y: f32, shelf: bool) -> Hit {
+    let l = hover_layout(p, shelf);
     if within(l.notes, BTN_R, x, y) {
         Hit::PeekNotes
+    } else if l.shelf.is_some_and(|c| within(c, BTN_R, x, y)) {
+        Hit::PeekShelf
     } else if within(l.ring, BTN_R, x, y) {
         Hit::PeekRing
     } else if within(l.clip, BTN_R, x, y) {
@@ -166,14 +181,14 @@ fn section(r: &Renderer, s: &str, at: RectF, alpha: f32) {
 }
 
 /// `s` centred in `rect`, in a left-aligned style.
-fn centred(r: &Renderer, s: &str, f: F, rect: RectF, c: D2D1_COLOR_F) {
+pub fn centred(r: &Renderer, s: &str, f: F, rect: RectF, c: D2D1_COLOR_F) {
     let w = r.measure(f, s);
     let (l, rr) = (rect.cx() - w / 2.0 - 1.0, rect.cx() + w / 2.0 + 3.0);
     r.text(s, f, RectF { l, t: rect.t, r: rr, b: rect.b }.d2d(), c);
 }
 
 /// Lightens a fill a little while the pointer is on it.
-fn lit(r: &Renderer, base: u32, hovered: bool) -> u32 {
+pub fn lit(r: &Renderer, base: u32, hovered: bool) -> u32 {
     mix(base, r.pal.wash, if hovered { 0.09 } else { 0.0 })
 }
 
@@ -358,21 +373,15 @@ pub fn draw_segment(r: &Renderer, v: &View, rect: RectF, active: bool, hovered: 
     let pal = r.pal;
     if v.timer.phase == Phase::Idle {
         let fg = if active { pal.timer } else if hovered { pal.text2 } else { pal.muted };
-        r.glyph('\u{E916}', F::Icon16, rect.l + 22.0, rect.cy(), color(fg, alpha));
-        r.text("Timer", F::Seg, RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b }.d2d(), color(fg, alpha));
+        // only the open tab shows its name; the others are just the icon
+        r.glyph('\u{E916}', F::Icon16, if active { rect.l + 22.0 } else { rect.cx() }, rect.cy(), color(fg, alpha));
+        if active {
+            r.text("Timer", F::Seg, RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b }.d2d(), color(fg, alpha));
+        }
     } else {
         let digits = if active { pal.timer } else if hovered { pal.text } else { pal.text2 };
         draw_chip(r, &v.timer, rect.l + 15.5, rect.cy(), pal.timer, digits, alpha);
     }
-}
-
-/// The collapsed pill while a timer runs: the readout takes the place of the faint dash.
-pub fn draw_resting(r: &Renderer, v: &View, pill: RectF, alpha: f32) {
-    if !v.timer.active() {
-        return;
-    }
-    let w = chip_width(r, &v.timer);
-    draw_chip(r, &v.timer, pill.cx() - w / 2.0, pill.cy(), r.pal.timer, r.pal.text, alpha);
 }
 
 /// The copy peek's right-hand slot: a divider, then the readout.
@@ -389,18 +398,19 @@ pub fn draw_peek_slot(r: &Renderer, v: &View, pill: RectF, alpha: f32) {
 // ---------------------------------------------------------------- the capsules
 
 /// How far the capsule has widened towards `target` (0..1), eased: its content fades in with it.
-fn grown(pill: RectF, target: f32) -> f32 {
+pub fn grown(pill: RectF, target: f32) -> f32 {
     smoothstep(0.5, 1.0, (pill.w() - COLLAPSED_W) / (target - COLLAPSED_W))
 }
 
 /// Hover capsule: notepad button, pause / resume ring, the time, clipboard button.
 pub fn draw_hover(r: &Renderer, v: &View, pill: RectF) {
-    let a = grown(pill, HOVER_W);
+    let shelf = v.shelf.items.len();
+    let a = grown(pill, if shelf > 0 { HOVER_SHELF_W } else { HOVER_W });
     if a < 0.02 {
         return;
     }
     let (pal, t) = (r.pal, &v.timer);
-    let l = hover_layout(pill);
+    let l = hover_layout(pill, shelf > 0);
     let tint = |accent: u32, hovered: bool| lit(r, mix(pal.rest, accent, 0.22), hovered);
 
     r.fill_circle(l.notes.0, l.notes.1, BTN_R, color(tint(pal.notes, v.hover == Hit::PeekNotes), a));
@@ -417,6 +427,14 @@ pub fn draw_hover(r: &Renderer, v: &View, pill: RectF) {
 
     r.fill_circle(l.clip.0, l.clip.1, BTN_R, color(tint(pal.clip, v.hover == Hit::PeekClip), a));
     r.glyph('\u{E77F}', F::Icon14, l.clip.0, l.clip.1, color(pal.clip, a));
+
+    if let Some(c) = l.shelf {
+        r.fill_circle(c.0, c.1, BTN_R, color(tint(pal.shelf, v.hover == Hit::PeekShelf), a));
+        r.tray(c.0, c.1, 15.0, color(pal.shelf, a));
+        let (bx, by) = (c.0 + 11.0, c.1 - 11.0); // how many files it holds
+        r.fill_circle(bx, by, 7.5, color(pal.shelf, a));
+        r.text(&shelf.to_string(), F::Keycap, RectF { l: bx - 8.0, t: by - 8.0, r: bx + 8.0, b: by + 8.0 }.d2d(), color(pal.ink, a));
+    }
 }
 
 /// Time's-up capsule: a glowing rim, a bell, "Time's up" (and the label), "+5 min" and "Done".
@@ -500,15 +518,27 @@ mod tests {
     #[test]
     fn the_capsule_buttons_are_where_they_are_drawn() {
         let p = pill_rect(HOVER_W, PEEK_H);
-        let l = hover_layout(p);
-        assert_eq!(hover_hit(p, l.notes.0, l.notes.1), Hit::PeekNotes);
-        assert_eq!(hover_hit(p, l.ring.0, l.ring.1), Hit::PeekRing);
-        assert_eq!(hover_hit(p, l.clip.0, l.clip.1), Hit::PeekClip);
-        assert_eq!(hover_hit(p, l.time.cx(), p.cy()), Hit::PeekTime);
-        assert_eq!(hover_hit(p, l.time.r + 5.0, p.cy()), Hit::Pill, "elsewhere on the capsule opens the panel");
+        let l = hover_layout(p, false);
+        assert_eq!(hover_hit(p, l.notes.0, l.notes.1, false), Hit::PeekNotes);
+        assert_eq!(hover_hit(p, l.ring.0, l.ring.1, false), Hit::PeekRing);
+        assert_eq!(hover_hit(p, l.clip.0, l.clip.1, false), Hit::PeekClip);
+        assert_eq!(hover_hit(p, l.time.cx(), p.cy(), false), Hit::PeekTime);
+        assert_eq!(hover_hit(p, l.time.r + 5.0, p.cy(), false), Hit::Pill, "elsewhere on the capsule opens the panel");
         // everything fits inside the capsule, with the time clear of both buttons
         assert!(l.notes.0 - BTN_R >= p.l && l.clip.0 + BTN_R <= p.r);
         assert!(l.ring.0 + BTN_R < l.time.l && l.time.r < l.clip.0 - BTN_R);
+
+        // with files on the shelf the capsule has a shelf button and reads notepad, clipboard, shelf, ring, time
+        let p = pill_rect(HOVER_SHELF_W, PEEK_H);
+        let l = hover_layout(p, true);
+        let shelf = l.shelf.expect("a shelf button");
+        assert_eq!(hover_hit(p, shelf.0, shelf.1, true), Hit::PeekShelf);
+        assert_eq!(hover_hit(p, l.clip.0, l.clip.1, true), Hit::PeekClip);
+        assert_eq!(hover_hit(p, l.ring.0, l.ring.1, true), Hit::PeekRing);
+        assert_ne!(hover_hit(p, shelf.0, shelf.1, false), Hit::PeekShelf, "no shelf button without files");
+        let xs = [l.notes.0, l.clip.0, shelf.0, l.ring.0];
+        assert!(xs.windows(2).all(|w| w[0] + 2.0 * BTN_R < w[1]), "the four buttons do not touch");
+        assert!(l.notes.0 - BTN_R >= p.l && l.ring.0 + BTN_R < l.time.l && l.time.r <= p.r);
 
         let p = pill_rect(TIMES_UP_W, PEEK_H);
         let l = times_up_layout(p);
@@ -519,26 +549,36 @@ mod tests {
     }
 
     #[test]
-    fn the_header_has_room_for_three_tabs_and_the_buttons() {
-        let (n, c, t) = (seg_notes(), seg_clip(), seg_timer());
-        assert!(n.r < c.l && c.r < t.l);
-        assert!(t.r <= seg_bg().r && seg_bg().r < btn_pin().l);
-        assert_eq!(hit_test_tab(t.cx(), t.cy()), Hit::TabTimer);
-        assert_eq!(hit_test_tab(n.cx(), n.cy()), Hit::TabNotes);
+    fn the_header_has_room_for_four_tabs_and_the_buttons() {
+        let expect = [Hit::TabNotes, Hit::TabClip, Hit::TabTimer, Hit::TabShelf];
+        for open in Tab::ALL {
+            for timer_on in [false, true] {
+                let h = header(open, timer_on);
+                assert!(h.seg.windows(2).all(|w| w[0].r < w[1].l), "{open:?}: tabs do not touch");
+                assert!(h.seg[3].r <= h.bg.r && h.bg.r < btn_pin().l, "{open:?}: the track ends before the pin");
+                for (i, t) in Tab::ALL.into_iter().enumerate() {
+                    let c = h.of(t);
+                    assert_eq!(hit_test_tab(open, timer_on, c.cx(), c.cy()), expect[i], "{open:?} timer_on={timer_on} {t:?}");
+                }
+                // the open tab is wide enough for its name, a running timer for "1:24:58"
+                assert!(h.of(open).w() >= 82.0 && (!timer_on || h.of(Tab::Timer).w() >= 96.0));
+            }
+        }
     }
 
-    fn hit_test_tab(x: f32, y: f32) -> Hit {
+    fn hit_test_tab(open: Tab, timer_on: bool, x: f32, y: f32) -> Hit {
         let (list, tabs) = (ListLayout::default(), NoteTabs::empty());
         let ctx = HitCtx {
             w: EXPANDED_W,
             h: EXPANDED_H,
             expanded: true,
-            tab: Tab::Notes,
+            tab: open,
             scroll: 0.0,
             list: &list,
             tabs: &tabs,
-            timer: Phase::Idle,
+            timer: if timer_on { Phase::Running } else { Phase::Idle },
             capsule: Capsule::None,
+            shelf_n: 0,
         };
         hit_test(x, y, &ctx)
     }
