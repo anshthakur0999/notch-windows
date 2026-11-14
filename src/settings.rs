@@ -167,11 +167,12 @@ impl Settings {
         s
     }
 
-    /// Writes the settings back (the tray menu changes them). A file that could not be read is
-    /// kept as `settings.json.bad` instead of being overwritten.
+    /// Writes the settings back (the tray menu changes them). A file that `load` could not read
+    /// (broken JSON, or a value of the wrong type such as `"max_items": "300"`) is kept as
+    /// `settings.json.bad` instead of being overwritten.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Ok(text) = std::fs::read_to_string(path) {
-            if serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).is_err() {
+            if serde_json::from_str::<Settings>(text.trim_start_matches('\u{feff}')).is_err() {
                 let _ = std::fs::rename(path, path.with_extension("json.bad"));
             }
         }
@@ -319,6 +320,30 @@ mod tests {
         s.save(&p).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), "{ my careful edits");
         assert_eq!(Settings::load(&p), s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wrongly_typed_value_is_kept_in_a_bad_copy_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("notch-settings-type-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        let mine = r#"{ "hotkey_toggle": "Ctrl+Alt+Q", "max_items": "300" }"#; // valid JSON, wrong type
+        std::fs::write(&p, mine).unwrap();
+        assert_eq!(Settings::load(&p), Settings::default(), "the whole file is unreadable as settings");
+        Settings::default().save(&p).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), mine);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_readable_file_is_not_copied_to_bad() {
+        let dir = std::env::temp_dir().join(format!("notch-settings-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        std::fs::write(&p, r#"{ "max_items": 77, "theme": "chartreuse" }"#).unwrap();
+        Settings::load(&p).save(&p).unwrap();
+        assert!(!dir.join("settings.json.bad").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

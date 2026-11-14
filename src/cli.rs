@@ -6,6 +6,9 @@ pub const CMD_HIDE: usize = 1;
 pub const CMD_SHOW: usize = 2;
 pub const CMD_TOGGLE: usize = 3;
 pub const CMD_QUIT: usize = 4;
+/// Sent in `WM_APP_COMMAND`'s `lParam`. `WM_APP + n` is a plain number that any program may post
+/// to a top-level window, so a command only counts when it carries this tag ("NOTC").
+pub const CMD_MAGIC: isize = 0x4E4F_5443;
 
 pub const USAGE: &str = "Notch - floating pill with notepad and clipboard history
 

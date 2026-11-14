@@ -168,9 +168,10 @@ pub fn ago(now: u64, ts: u64) -> String {
     if secs < 45 {
         return "just now".into();
     }
-    let mins = (secs + 30) / 60;
-    if mins < 60 {
-        return format!("{mins} min ago");
+    if secs < 3600 {
+        // rounded to the nearest minute, but 59 min 45 s is not yet "60 min" (it would fall
+        // through to "0 hr ago")
+        return format!("{} min ago", ((secs + 30) / 60).min(59));
     }
     let hours = secs / 3600;
     if hours < 24 {
@@ -187,7 +188,7 @@ pub fn ago(now: u64, ts: u64) -> String {
     if weeks < 52 {
         return format!("{weeks} wk ago");
     }
-    format!("{} yr ago", days / 365)
+    format!("{} yr ago", (days / 365).max(1)) // day 364 is already past 51 weeks
 }
 
 /// Writes `bytes` to `path` atomically (temp file in the same folder, then rename).
@@ -584,6 +585,13 @@ mod tests {
         assert_eq!(ago(now, now - 5 * 86_400), "5 days ago");
         assert_eq!(ago(now, now - 21 * 86_400), "3 wk ago");
         assert_eq!(ago(now, now + 500), "just now"); // clock skew never underflows
+        // the edges between two units never read "0 hr ago" / "0 yr ago"
+        assert_eq!(ago(now, now - 3569), "59 min ago");
+        assert_eq!(ago(now, now - 3570), "59 min ago");
+        assert_eq!(ago(now, now - 3599), "59 min ago");
+        assert_eq!(ago(now, now - 3600), "1 hr ago");
+        assert_eq!(ago(now, now - 364 * 86_400), "1 yr ago");
+        assert_eq!(ago(now, now - 800 * 86_400), "2 yr ago");
     }
 
     #[test]

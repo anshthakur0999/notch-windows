@@ -149,6 +149,32 @@ pub fn notes_rect() -> RectF {
     at(10.0, 104.0, EXPANDED_W - 20.0, FOOTER_SEP - 4.0 - 104.0)
 }
 
+/// True once the opening pill, at its animated size `w` x `h`, is big enough to hold the notepad
+/// window: all four corners of `notes_rect()` are inside the pill's rounded outline.
+///
+/// The notepad is a native window on top of the pill, so it cannot grow with it; it is shown the
+/// moment this turns true instead of waiting for the spring to settle. The spring looks finished
+/// well before it is formally at rest (the last stretch is sub-pixel), and waiting for that left
+/// the open panel blank for a third of a second.
+pub fn pill_holds_notes(w: f32, h: f32) -> bool {
+    /// Keep the window's corners this far inside the outline, so no sliver pokes out.
+    const MARGIN: f32 = 2.0;
+    let p = pill_rect(w, h);
+    let r = pill::radius(h);
+    let n = notes_rect();
+    // The nearest point of the pill's straight-edged core (the rectangle inset by the radius):
+    // a point is inside the rounded outline when it is no farther than `r` from that core.
+    let core = p.inset(r);
+    [(n.l, n.t), (n.r, n.t), (n.l, n.b), (n.r, n.b)].into_iter().all(|(x, y)| {
+        if x < p.l + MARGIN || x > p.r - MARGIN || y < p.t + MARGIN || y > p.b - MARGIN {
+            return false;
+        }
+        let dx = x - x.clamp(core.l, core.r);
+        let dy = y - y.clamp(core.t, core.b);
+        dx.hypot(dy) <= r - MARGIN
+    })
+}
+
 pub struct HitCtx<'a> {
     pub w: f32,
     pub h: f32,
@@ -230,4 +256,60 @@ pub struct PeekView<'a> {
     /// What the capsule showed before the last copy, while it cross-fades out.
     pub prev: Option<&'a crate::peek::Content>,
     pub look: crate::peek::Look,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anim::Spring;
+
+    /// Frames (at 60 Hz) after which the opening pill can hold the notepad, and the frame at which
+    /// the spring is formally at rest; the pill's animated size is the same on every frame in
+    /// between, so this is exactly what the app sees.
+    fn open_timeline() -> (Vec<bool>, usize) {
+        let (mut w, mut h) = (Spring::new(COLLAPSED_W), Spring::new(COLLAPSED_H));
+        w.set_target(EXPANDED_W);
+        h.set_target(EXPANDED_H);
+        let mut holds = Vec::new();
+        let mut settled_at = None;
+        for frame in 1..=120 {
+            w.step(1.0 / 60.0);
+            h.step(1.0 / 60.0);
+            holds.push(pill_holds_notes(w.pos, h.pos));
+            if settled_at.is_none() && w.settled() && h.settled() {
+                settled_at = Some(frame);
+            }
+        }
+        (holds, settled_at.expect("the opening spring settles within two seconds"))
+    }
+
+    #[test]
+    fn the_notepad_fits_the_open_pill_but_not_the_closed_one() {
+        assert!(pill_holds_notes(EXPANDED_W, EXPANDED_H));
+        assert!(!pill_holds_notes(COLLAPSED_W, COLLAPSED_H));
+        // tall enough but still narrow, and wide enough but still short
+        assert!(!pill_holds_notes(COLLAPSED_W, EXPANDED_H));
+        assert!(!pill_holds_notes(EXPANDED_W, COLLAPSED_H));
+    }
+
+    #[test]
+    fn the_notepad_never_pokes_out_through_a_rounded_corner() {
+        // the bottom corners of the window sit close to the pill's rounded bottom corners: a pill
+        // that only just reaches below the window must not count while the arc still cuts it off
+        let n = notes_rect();
+        let h = n.b - TOP + 3.0; // 3 DIP of pill below the window's bottom edge
+        assert!(!pill_holds_notes(EXPANDED_W, h), "h={h}");
+        assert!(pill_holds_notes(EXPANDED_W, EXPANDED_H));
+    }
+
+    #[test]
+    fn the_notepad_is_shown_well_before_the_spring_settles_and_stays_shown() {
+        let (holds, settled_at) = open_timeline();
+        let first = holds.iter().position(|&b| b).expect("the pill opens far enough") + 1;
+        // a third of a second of blank panel is what this replaces: it has to be a lot earlier
+        assert!(first + 12 <= settled_at, "shown at frame {first}, spring at rest at {settled_at}");
+        assert!(first <= 12, "shown at frame {first} (~{} ms)", first * 1000 / 60);
+        // once the pill can hold it, the overshoot and settling never take that away again
+        assert!(holds[first - 1..].iter().all(|&b| b), "the pill dipped below the notepad again");
+    }
 }

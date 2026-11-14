@@ -413,6 +413,7 @@ impl App {
         }
         self.w.set(w);
         self.h.set(h);
+        self.reveal_notes_early(w.pos, h.pos);
 
         let t0 = Instant::now();
         window::set_region(self.hwnd, self.dpi.get(), w.pos, h.pos);
@@ -433,6 +434,24 @@ impl App {
         if done {
             self.animating.set(false);
             self.on_settled();
+        }
+    }
+
+    /// While the pill opens on the notepad tab, shows the note as soon as the pill is big enough to
+    /// hold it (`ui::pill_holds_notes`) instead of when the spring has formally come to rest, which
+    /// is a good 250 ms after the panel already looks open and left the note area blank.
+    fn reveal_notes_early(&self, w: f32, h: f32) {
+        if !self.open.get() || self.tab.get() != Tab::Notes || self.notes.is_visible() {
+            return;
+        }
+        if !ui::pill_holds_notes(w, h) {
+            return;
+        }
+        crate::log(&format!("notes shown early at w={w:.1} h={h:.1}"));
+        self.show_notes();
+        if self.want_focus.get() {
+            self.want_focus.set(false);
+            self.notes.focus();
         }
     }
 
@@ -735,6 +754,10 @@ impl App {
             if fg != self.hwnd && fg != self.notes.hwnd() && fg != self.notes.edit_hwnd() {
                 self.prev_fg.set(fg);
             }
+        }
+        if self.tab.get() == Tab::Notes {
+            // build the editor before the first frame (only the first time ever), not mid-animation
+            self.notes.prepare(self.hwnd);
         }
         self.peek_clear(); // the springs carry on from wherever the capsule was
         self.open.set(true);
@@ -1499,7 +1522,9 @@ impl App {
                     }
                 }
             }
-            T_SAVE => self.notes.flush(),
+            T_SAVE => {
+                self.notes.flush();
+            }
             T_PEEK => self.peek_hold_over(),
             T_FS => self.update_fullscreen(),
             T_PASTE => {
@@ -1806,7 +1831,7 @@ impl App {
                     LRESULT(0)
                 }
                 WM_APP_CLIPDONE => {
-                    clipboard::on_image_done(self, lp);
+                    clipboard::on_image_done(self);
                     LRESULT(0)
                 }
                 WM_COMMAND => {
@@ -1832,7 +1857,7 @@ impl App {
                     self.on_tray(lp);
                     LRESULT(0)
                 }
-                WM_APP_COMMAND => {
+                WM_APP_COMMAND if lp.0 == crate::cli::CMD_MAGIC => {
                     self.on_app_command(wp.0);
                     LRESULT(0)
                 }

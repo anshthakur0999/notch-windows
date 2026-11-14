@@ -15,9 +15,9 @@ mod ui;
 mod window;
 
 use app::App;
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, Sleep};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
@@ -66,7 +66,7 @@ fn send_command(cmd: usize, name: &str) {
     unsafe {
         match FindWindowW(window::CLASS_NAME, PCWSTR::null()) {
             Ok(h) if !h.0.is_null() => {
-                if PostMessageW(Some(h), app::WM_APP_COMMAND, WPARAM(cmd), LPARAM(0)).is_ok() {
+                if PostMessageW(Some(h), app::WM_APP_COMMAND, WPARAM(cmd), LPARAM(cli::CMD_MAGIC)).is_ok() {
                     say(&format!("Notch: {name}"));
                 } else {
                     say("Notch: could not reach the running instance.");
@@ -100,14 +100,25 @@ fn main() {
         }
     };
     unsafe {
-        // Single instance.
-        let _mutex = match CreateMutexW(None, false, w!("Local\\Notch.Singleton.v1")) {
-            Ok(h) => h,
-            Err(_) => return,
+        // Single instance. `notch.exe quit` returns at once, while the old copy still needs a
+        // moment to save and exit, so a copy started right after it waits (up to 2 s) instead
+        // of quietly giving up.
+        let mut tries = 0;
+        let _mutex = loop {
+            let h = match CreateMutexW(None, false, w!("Local\\Notch.Singleton.v1")) {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                break h;
+            }
+            let _ = CloseHandle(h); // keeping it would keep the old copy's mutex alive
+            tries += 1;
+            if tries >= 40 {
+                return;
+            }
+            Sleep(50);
         };
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            return;
-        }
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
