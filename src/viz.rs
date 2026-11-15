@@ -7,7 +7,7 @@
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient,
@@ -89,9 +89,10 @@ fn run(hwnd: isize, msg: u32, stop: Arc<AtomicBool>) {
     };
     while !stop.load(Ordering::Acquire) {
         if listen(&stop, &post).is_none() {
-            crate::log("viz: no output device to listen to, trying again");
+            crate::log("viz: no output device to listen to, or the default output changed: binding again");
         }
-        // the device went away (headphones, a driver update) or there was none: look again shortly
+        // the device went away (headphones, a driver update), the default moved to another one, or
+        // there was none: look again shortly
         for _ in 0..10 {
             if stop.load(Ordering::Acquire) {
                 break;
@@ -102,12 +103,14 @@ fn run(hwnd: isize, msg: u32, stop: Arc<AtomicBool>) {
     *LEVELS.lock().unwrap_or_else(|e| e.into_inner()) = [0.0; BANDS];
 }
 
-/// One listening session on the current default output device. `None` if it could not start or
-/// the device went away; `Some` when asked to stop.
+/// One listening session on the current default output device. `None` if it could not start, the
+/// device went away or the default moved to another one (the stream is bound to the device it
+/// started on and would go on hearing silence); `Some` when asked to stop.
 fn listen(stop: &AtomicBool, post: &dyn Fn()) -> Option<()> {
     unsafe {
         let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
         let device = devices.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        let bound = crate::audio::id_of(&device)?;
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ok()?;
         let fmt = client.GetMixFormat().ok()?;
         let WAVEFORMATEX { wFormatTag: tag, nChannels: channels, nSamplesPerSec: rate, wBitsPerSample: bits, .. } =
@@ -128,8 +131,17 @@ fn listen(stop: &AtomicBool, post: &dyn Fn()) -> Option<()> {
         let mut samples: Vec<f32> = Vec::with_capacity(N * 2);
         let mut bars = [0.0f32; BANDS];
         let mut moving = false;
+        let mut checked = Instant::now();
         while !stop.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(INTERVAL_MS.load(Ordering::Relaxed) as u64));
+            if checked.elapsed() >= Duration::from_secs(1) {
+                checked = Instant::now();
+                let now = devices.GetDefaultAudioEndpoint(eRender, eConsole).ok().and_then(|d| crate::audio::id_of(&d));
+                if crate::audio::default_moved(&bound, now.as_deref()) {
+                    let _ = client.Stop();
+                    return None;
+                }
+            }
             // everything that arrived since last time, as one mono stream
             while capture.GetNextPacketSize().ok()? > 0 {
                 let (mut data, mut frames, mut flags) = (std::ptr::null_mut::<u8>(), 0u32, 0u32);

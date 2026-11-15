@@ -115,6 +115,9 @@ pub struct Settings {
     pub copy_peek_preview: bool,
     /// How long the capsule stays up (longer while the cursor is on it).
     pub copy_peek_ms: u32,
+    /// The pill opens a card when earbuds, a controller, a mouse or a keyboard connects (and
+    /// for low battery and audio switches). Off, the Devices tab still works.
+    pub device_banner: bool,
     /// Draw on the GPU. Off (default) uses Microsoft's WARP software rasteriser, which avoids
     /// loading the vendor graphics driver (often 50+ MB of RAM) for what is a tiny drawing job.
     pub use_gpu: bool,
@@ -148,6 +151,7 @@ impl Default for Settings {
             copy_peek: true,
             copy_peek_preview: true,
             copy_peek_ms: 2000,
+            device_banner: true,
             use_gpu: false,
             theme: Theme::default(),
             accent: Accent::default(),
@@ -251,7 +255,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.max_items, 200);
         assert!(s.paste_on_click);
-        assert!(s.copy_peek && s.copy_peek_preview);
+        assert!(s.copy_peek && s.copy_peek_preview && s.device_banner, "the cards are on unless switched off");
         assert_eq!(s.copy_peek_ms, 2000);
         assert_eq!(parse_hotkey(&s.hotkey_toggle), Some((MOD_WIN | MOD_ALT, b'N' as u32)));
         assert_eq!(parse_hotkey(&s.hotkey_clipboard), Some((MOD_WIN | MOD_ALT, b'V' as u32)));

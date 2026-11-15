@@ -3,12 +3,17 @@
 
 mod anim;
 mod app;
+mod audio;
 mod cli;
 mod clipboard;
+mod devices;
 mod dnd;
+mod link;
 mod media;
 mod notes;
+mod pair;
 mod peek;
+mod policy;
 mod render;
 mod settings;
 mod shelf;

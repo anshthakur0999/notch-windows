@@ -5,6 +5,8 @@
 //! expressed as offsets from the expanded pill's top-left corner (see `at`).
 
 pub mod clip_list;
+pub mod devices_tab;
+pub mod devices_view;
 pub mod media_view;
 pub mod notes_view;
 pub mod pill;
@@ -47,6 +49,15 @@ pub const DROP_W: f32 = 196.0;
 pub const ADDED_W: f32 = 212.0;
 /// The "now playing" banner shown when the track changes.
 pub const TRACK_W: f32 = 272.0;
+/// The device card (see `devices_view`): the short capsule a ring sweeps round before it opens, the
+/// card itself (with and without the "Use for audio" row), and the narrowest short notice.
+pub const SPARK_W: f32 = 176.0;
+pub const SPARK_H: f32 = 40.0;
+pub const CARD_W: f32 = 340.0;
+pub const CARD_H: f32 = 76.0;
+pub const CARD_H_AUDIO: f32 = 130.0;
+pub const NOTICE_H: f32 = 52.0;
+pub const NOTICE_MIN_W: f32 = 200.0;
 
 /// The resting pill grows when it carries more than one live item (see `shelf_view::draw_resting`):
 /// timer and media, and those two plus the shelf. The pill is `COLLAPSED_W` otherwise.
@@ -80,18 +91,24 @@ pub enum Capsule {
     Drop,
     Added,
     Track,
+    /// A device connected, ran low or was switched to: the card (see `devices_view`).
+    Device,
 }
 
 impl Capsule {
     /// The collapsed pill's shape. An alarm outranks everything; a file being dragged over the pill
-    /// outranks the "Added" toast; the hover capsule needs a timer that is still running (`hover`
-    /// stays set after "Done") or media on show; and the track banner gives way to all of them.
-    pub fn pick(open: bool, phase: Phase, hover: bool, drag: bool, toast: bool, media: bool, track: bool) -> Capsule {
+    /// outranks the "Added" toast, and a device card the hover capsule (the card is an event, the
+    /// hover capsule is only where the pointer rests); the hover capsule needs a timer that is still
+    /// running (`hover` stays set after "Done") or media on show; and the track banner gives way to
+    /// all of them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick(open: bool, phase: Phase, hover: bool, drag: bool, toast: bool, media: bool, track: bool, device: bool) -> Capsule {
         match phase {
             _ if open => Capsule::None,
             Phase::Finished => Capsule::TimesUp,
             _ if drag => Capsule::Drop,
             _ if toast => Capsule::Added,
+            _ if device => Capsule::Device,
             Phase::Running | Phase::Paused if hover => Capsule::Hover,
             _ if hover && media => Capsule::Hover,
             _ if track => Capsule::Track,
@@ -119,10 +136,11 @@ pub enum Tab {
     Timer,
     Shelf,
     Media,
+    Devices,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Notes, Tab::Clipboard, Tab::Timer, Tab::Shelf, Tab::Media];
+    pub const ALL: [Tab; 6] = [Tab::Notes, Tab::Clipboard, Tab::Timer, Tab::Shelf, Tab::Media, Tab::Devices];
 
     /// The tab after this one (the Tab key).
     pub fn next(self) -> Tab {
@@ -184,6 +202,26 @@ pub enum Hit {
     /// The hover capsule's art / title (opens the Media tab) and its play-pause button.
     PeekArt,
     PeekPlay,
+    /// Devices: its tab, an audio output chip (by position; click makes it the default), Windows'
+    /// Bluetooth settings (a button, or the link under a row that failed), and the device card's
+    /// "Use for audio" and x.
+    TabDevices,
+    OutputRow(usize),
+    BtSettings,
+    DeviceUse,
+    DeviceClose,
+    /// A connected device's Disconnect and an available device's Connect (by position in the list;
+    /// "Try again" is the same button).
+    DeviceDisconnect(usize),
+    DeviceConnect(usize),
+    /// "Add device" (a link, or the empty state's button) and "Turn on Bluetooth".
+    AddOpen,
+    BtOn,
+    /// The Add screen: back, Stop / Search again, a nearby device's Pair (or Try again) and Cancel.
+    AddBack,
+    AddStop,
+    AddPair(usize),
+    AddCancel,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -236,11 +274,11 @@ pub fn at(dx: f32, dy: f32, w: f32, h: f32) -> RectF {
 }
 
 // ---- header ----
-/// The header's tab segments in tab order (notepad, clipboard, timer, shelf, media) and the track
-/// behind them.
+/// The header's tab segments in tab order (notepad, clipboard, timer, shelf, media, devices) and the
+/// track behind them.
 pub struct Header {
     pub bg: RectF,
-    pub seg: [RectF; 5],
+    pub seg: [RectF; 6],
 }
 
 impl Header {
@@ -249,24 +287,28 @@ impl Header {
     }
 }
 
-/// The open tab shows its label and the others just their icon, so five fit. The timer's segment
-/// stays wide while it shows a readout (wide enough for "1:24:58" next to the ring).
+/// The open tab shows its label and the others just their icon, so six fit: the worst case is
+/// Clipboard open with a timer running, and the track still ends before the pin button. The timer's
+/// segment stays wide while it shows a readout (wide enough for "1:24:58" next to the ring).
 pub fn header(open: Tab, timer_on: bool) -> Header {
     let labelled = |t: Tab| match t {
-        Tab::Notes => 100.0,
-        Tab::Clipboard => 106.0,
-        Tab::Timer => 96.0,
-        Tab::Shelf => 82.0,
-        Tab::Media => 88.0,
+        Tab::Notes => 96.0,
+        Tab::Clipboard => 102.0,
+        Tab::Timer => 83.0,
+        Tab::Shelf => 78.0,
+        Tab::Media => 84.0,
+        Tab::Devices => 92.0,
     };
+    const ICON_ONLY: f32 = 36.0;
+    const GAP: f32 = 3.0;
     let mut x = 9.3;
     let seg = Tab::ALL.map(|t| {
-        let w = if t == open || (t == Tab::Timer && timer_on) { labelled(t) } else { 42.0 };
+        let w = if t == open || (t == Tab::Timer && timer_on) { labelled(t) } else { ICON_ONLY };
         let r = at(x, 9.3, w, 37.4);
-        x += w + 3.6;
+        x += w + GAP;
         r
     });
-    Header { bg: at(6.0, 6.0, x - 3.6 + 3.3 - 6.0, 44.0), seg }
+    Header { bg: at(6.0, 6.0, x - GAP + 3.3 - 6.0, 44.0), seg }
 }
 pub fn btn_pin() -> RectF {
     at(360.0, 13.0, 30.0, 30.0)
@@ -338,6 +380,9 @@ pub struct HitCtx<'a> {
     /// Something is playing (or paused) in a media app; and whether its player takes a seek.
     pub media: bool,
     pub seekable: bool,
+    /// What the Devices tab lists, and whether the device card on show has buttons.
+    pub dev: devices_tab::Shape<'a>,
+    pub card_buttons: bool,
 }
 
 pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
@@ -350,6 +395,7 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
             Capsule::None | Capsule::Drop | Capsule::Added | Capsule::Track => Hit::Pill,
             Capsule::Hover => timer_view::hover_hit(pill, x, y, c.shelf_n > 0, c.timer != Phase::Idle, c.media),
             Capsule::TimesUp => timer_view::times_up_hit(pill, x, y),
+            Capsule::Device => devices_view::card_hit(pill, x, y, c.card_buttons),
         };
     }
     let tabs = header(c.tab, c.timer != Phase::Idle);
@@ -359,6 +405,7 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
         (Tab::Timer, Hit::TabTimer),
         (Tab::Shelf, Hit::TabShelf),
         (Tab::Media, Hit::TabMedia),
+        (Tab::Devices, Hit::TabDevices),
     ] {
         if tabs.of(t).contains(x, y) {
             return hit;
@@ -399,6 +446,11 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
                 return hit;
             }
         }
+        Tab::Devices => {
+            if let Some(hit) = devices_tab::hit(x, y, c.scroll, &c.dev) {
+                return hit;
+            }
+        }
     }
     Hit::Pill
 }
@@ -433,6 +485,33 @@ pub struct View<'a> {
     pub shelf: ShelfView<'a>,
     /// What is playing, if anything.
     pub media: Option<MediaView<'a>>,
+    /// The Devices tab's lists, and the card on show on the collapsed pill.
+    pub devices: DevicesView<'a>,
+    pub card: Option<CardView<'a>>,
+}
+
+/// What the Devices tab and the device card draw.
+pub struct DevicesView<'a> {
+    pub shape: devices_tab::Shape<'a>,
+    pub outputs: &'a [crate::audio::Output],
+    /// Connected, and paired but not connected.
+    pub conn: &'a [crate::devices::Device],
+    pub avail: &'a [crate::devices::Device],
+    /// The Add screen: what was found nearby, the code to type on the device that is pairing (if
+    /// it shows one), and whether the search is still on.
+    pub near: &'a [crate::pair::Nearby],
+    pub code: Option<&'a str>,
+    pub searching: bool,
+    /// Seconds, for the rings that turn.
+    pub clock: f32,
+}
+
+/// The device card on the collapsed pill: what it says, and how long ago it appeared (the ring
+/// sweeps for the first 150 ms; `spark`: this card has that opening at all).
+pub struct CardView<'a> {
+    pub card: &'a devices_view::Card,
+    pub age: f32,
+    pub spark: bool,
 }
 
 /// What the live-media drawing needs this frame.
@@ -505,7 +584,7 @@ mod tests {
             (true, Running, true, Capsule::None),
             (true, Finished, false, Capsule::None),
         ] {
-            assert_eq!(Capsule::pick(open, phase, hover, false, false, false, false), want, "open={open} {phase:?} hover={hover}");
+            assert_eq!(Capsule::pick(open, phase, hover, false, false, false, false, false), want, "open={open} {phase:?} hover={hover}");
         }
     }
 
@@ -513,24 +592,37 @@ mod tests {
     fn a_drag_over_the_pill_outranks_the_toast_and_the_hover_but_not_an_alarm() {
         use Phase::*;
         // (open, phase, hover, drag, toast, media, track)
-        assert_eq!(Capsule::pick(false, Idle, false, true, false, false, false), Capsule::Drop);
-        assert_eq!(Capsule::pick(false, Running, true, true, true, false, false), Capsule::Drop, "a drag beats the toast and the hover");
-        assert_eq!(Capsule::pick(false, Idle, false, false, true, false, false), Capsule::Added);
-        assert_eq!(Capsule::pick(false, Running, true, false, true, false, false), Capsule::Added, "the toast beats the hover");
-        assert_eq!(Capsule::pick(false, Finished, false, true, true, true, true), Capsule::TimesUp, "an alarm beats everything");
-        assert_eq!(Capsule::pick(true, Idle, false, true, true, true, true), Capsule::None, "the open panel has no capsule");
+        assert_eq!(Capsule::pick(false, Idle, false, true, false, false, false, false), Capsule::Drop);
+        assert_eq!(Capsule::pick(false, Running, true, true, true, false, false, false), Capsule::Drop, "a drag beats the toast and the hover");
+        assert_eq!(Capsule::pick(false, Idle, false, false, true, false, false, false), Capsule::Added);
+        assert_eq!(Capsule::pick(false, Running, true, false, true, false, false, false), Capsule::Added, "the toast beats the hover");
+        assert_eq!(Capsule::pick(false, Finished, false, true, true, true, true, false), Capsule::TimesUp, "an alarm beats everything");
+        assert_eq!(Capsule::pick(true, Idle, false, true, true, true, true, false), Capsule::None, "the open panel has no capsule");
     }
 
     #[test]
     fn media_gets_a_hover_capsule_and_a_banner_that_gives_way_to_the_rest() {
         use Phase::*;
-        assert_eq!(Capsule::pick(false, Idle, true, false, false, true, false), Capsule::Hover, "hovering with media on show");
-        assert_eq!(Capsule::pick(false, Idle, true, false, false, false, false), Capsule::None, "nothing to show");
-        assert_eq!(Capsule::pick(false, Idle, false, false, false, true, false), Capsule::None, "resting: just the chip");
-        assert_eq!(Capsule::pick(false, Idle, false, false, false, true, true), Capsule::Track);
-        assert_eq!(Capsule::pick(false, Idle, true, false, false, true, true), Capsule::Hover, "the pointer beats the banner");
-        assert_eq!(Capsule::pick(false, Running, false, false, true, true, true), Capsule::Added, "a file toast beats the banner");
-        assert_eq!(Capsule::pick(false, Running, true, false, false, true, false), Capsule::Hover);
+        assert_eq!(Capsule::pick(false, Idle, true, false, false, true, false, false), Capsule::Hover, "hovering with media on show");
+        assert_eq!(Capsule::pick(false, Idle, true, false, false, false, false, false), Capsule::None, "nothing to show");
+        assert_eq!(Capsule::pick(false, Idle, false, false, false, true, false, false), Capsule::None, "resting: just the chip");
+        assert_eq!(Capsule::pick(false, Idle, false, false, false, true, true, false), Capsule::Track);
+        assert_eq!(Capsule::pick(false, Idle, true, false, false, true, true, false), Capsule::Hover, "the pointer beats the banner");
+        assert_eq!(Capsule::pick(false, Running, false, false, true, true, true, false), Capsule::Added, "a file toast beats the banner");
+        assert_eq!(Capsule::pick(false, Running, true, false, false, true, false, false), Capsule::Hover);
+    }
+
+    #[test]
+    fn a_device_card_outranks_the_hover_capsule_and_the_banner_but_not_an_alarm_or_a_file() {
+        use Phase::*;
+        // (open, phase, hover, drag, toast, media, track, device)
+        assert_eq!(Capsule::pick(false, Idle, false, false, false, false, false, true), Capsule::Device);
+        assert_eq!(Capsule::pick(false, Running, true, false, false, true, true, true), Capsule::Device, "the card is an event, hovering is not");
+        assert_eq!(Capsule::pick(false, Idle, false, false, false, true, true, true), Capsule::Device, "and the track banner gives way");
+        assert_eq!(Capsule::pick(false, Finished, false, false, false, false, false, true), Capsule::TimesUp, "an alarm beats it");
+        assert_eq!(Capsule::pick(false, Idle, false, true, false, false, false, true), Capsule::Drop, "a file drag beats it");
+        assert_eq!(Capsule::pick(false, Idle, false, false, true, false, false, true), Capsule::Added);
+        assert_eq!(Capsule::pick(true, Idle, false, false, false, false, false, true), Capsule::None, "the open panel has no capsule");
     }
 
     #[test]
