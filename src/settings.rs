@@ -129,6 +129,9 @@ pub struct Settings {
     pub monitor: String,
     /// Files on the shelf clear themselves after this many hours (0 = keep until cleared).
     pub shelf_hours: u32,
+    /// The bars on the Media tab and the pill move with the music. Off, nothing is ever sampled
+    /// (the "Bars" switch on the Media tab).
+    pub visualizer: bool,
 }
 
 impl Default for Settings {
@@ -151,6 +154,7 @@ impl Default for Settings {
             text_size: TextSize::default(),
             monitor: String::new(),
             shelf_hours: 24,
+            visualizer: true,
         }
     }
 }
@@ -283,6 +287,7 @@ mod tests {
         assert_eq!(s.collapse_delay_ms, 100); // default
         assert_eq!(s.copy_peek_ms, 500); // clamped up
         assert!(s.copy_peek); // default
+        assert!(s.visualizer, "a settings.json from before the visualizer existed keeps it on");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -222,32 +222,57 @@ fn draw_slot(r: &Renderer, v: &View, t: RectF, alpha: f32) {
 
 // ---------------------------------------------------------------- on the pill
 
+/// The shelf's dot on a crowded resting pill.
+const DOT_W: f32 = 8.0;
+
 /// Width of the shelf's readout on the resting pill: the tray, then the count.
 fn chip_width(r: &Renderer, n: usize) -> f32 {
     21.0 + r.clock_width(F::ClockSm, &n.to_string())
 }
 
-/// The collapsed pill while a timer runs or the shelf holds files: the timer's ring and time on the
-/// left, the shelf's tray and count on the right, each only while in use.
+/// The collapsed pill while a timer runs, media plays or the shelf holds files: the timer's ring and
+/// time, then the media chip, then the shelf's tray and count, each only while in use. Three at
+/// once do not fit as they are, so the shelf shrinks to a dot (the hover capsule has its count).
 pub fn draw_resting(r: &Renderer, v: &View, pill: RectF, alpha: f32) {
-    let (timer, n) = (v.timer.active(), v.shelf.items.len());
+    let (timer, media, n) = (v.timer.active(), v.media.as_ref(), v.shelf.items.len());
+    let dot = timer && media.is_some() && n > 0;
     let tw = if timer { timer_view::chip_width(r, &v.timer) } else { 0.0 };
-    let sw = if n > 0 { chip_width(r, n) } else { 0.0 };
+    let mw = if media.is_some() { media_view::CHIP_W } else { 0.0 };
+    let sw = match n {
+        0 => 0.0,
+        _ if dot => DOT_W,
+        _ => chip_width(r, n),
+    };
     const GAP: f32 = 22.0; // the divider and the room either side of it
-    let total = tw + sw + if timer && n > 0 { GAP } else { 0.0 };
+    let parts = [tw, mw, sw].iter().filter(|w| **w > 0.0).count();
+    let total = tw + mw + sw + GAP * parts.saturating_sub(1) as f32;
     let mut x = pill.cx() - total / 2.0;
     let cy = pill.cy();
+    let divider = |x: &mut f32| {
+        r.line(*x + GAP / 2.0, cy - 7.0, *x + GAP / 2.0, cy + 7.0, color(r.pal.wash, 0.16 * alpha), 1.0);
+        *x += GAP;
+    };
     if timer {
         timer_view::draw_chip(r, &v.timer, x, cy, r.pal.timer, r.pal.text, alpha);
         x += tw;
     }
-    if timer && n > 0 {
-        r.line(x + GAP / 2.0, cy - 7.0, x + GAP / 2.0, cy + 7.0, color(r.pal.wash, 0.16 * alpha), 1.0);
-        x += GAP;
+    if let Some(m) = media {
+        if timer {
+            divider(&mut x);
+        }
+        media_view::draw_chip(r, m, x, cy, alpha);
+        x += mw;
     }
     if n > 0 {
-        r.tray(x + 7.0, cy, 14.0, color(r.pal.shelf, alpha));
-        r.clock_text(&n.to_string(), F::ClockSm, x + 21.0, cy, color(r.pal.text, alpha));
+        if timer || media.is_some() {
+            divider(&mut x);
+        }
+        if dot {
+            r.fill_circle(x + DOT_W / 2.0, cy, DOT_W / 2.0, color(r.pal.shelf, alpha));
+        } else {
+            r.tray(x + 7.0, cy, 14.0, color(r.pal.shelf, alpha));
+            r.clock_text(&n.to_string(), F::ClockSm, x + 21.0, cy, color(r.pal.text, alpha));
+        }
     }
 }
 

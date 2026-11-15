@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod clipboard;
 mod dnd;
+mod media;
 mod notes;
 mod peek;
 mod render;
@@ -16,6 +17,7 @@ mod shell;
 mod store;
 mod timer;
 mod ui;
+mod viz;
 mod window;
 
 use app::App;

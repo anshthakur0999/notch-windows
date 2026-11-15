@@ -85,7 +85,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     let dash_gone = peek.map_or(0.0, |p| (p.look.icon + p.look.old_icon).max(p.look.label).max(p.look.line).min(1.0));
     // a running timer or files on the shelf take the dash's place on the resting pill; the capsules cover it.
     // They come back with the dash, as the peek's text goes, not only once the peek is gone.
-    let chips = (v.timer.active() || !v.shelf.items.is_empty()) && v.timer.capsule == Capsule::None;
+    let chips = (v.timer.active() || !v.shelf.items.is_empty() || v.media.is_some()) && v.timer.capsule == Capsule::None;
     let dash = if chips || v.timer.capsule != Capsule::None { 0.0 } else { 1.0 - dash_gone };
     draw_body(r, pill, rad, t, body_a, dash);
     if chips {
@@ -100,6 +100,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
         Capsule::TimesUp => timer_view::draw_times_up(r, v, pill),
         Capsule::Drop => shelf_view::draw_drop(r, pill),
         Capsule::Added => shelf_view::draw_added(r, v, pill),
+        Capsule::Track => media_view::draw_banner(r, v, pill),
         Capsule::None => {}
     }
 
@@ -114,6 +115,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
             Tab::Clipboard => clip_list::draw(r, v, alpha),
             Tab::Timer => timer_view::draw(r, v, alpha),
             Tab::Shelf => shelf_view::draw(r, v, alpha),
+            Tab::Media => media_view::draw(r, v, alpha),
         }
         r.pop_clip();
     }
@@ -234,12 +236,13 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
     let hd = header(v.tab, v.timer.phase != crate::timer::Phase::Idle);
     r.fill_rrect(hd.bg.d2d(), hd.bg.h() / 2.0, color(pal.seg, alpha));
 
-    // (label, icon, tab, hit, accent); the shelf's icon is drawn, not a glyph
+    // (label, icon, tab, hit, accent); the shelf's and media's icons are drawn, not glyphs
     let tabs = [
         ("Notepad", Some('\u{E8A5}'), Tab::Notes, Hit::TabNotes, pal.notes),
         ("Clipboard", Some('\u{E77F}'), Tab::Clipboard, Hit::TabClip, pal.clip),
         ("Timer", Some('\u{E916}'), Tab::Timer, Hit::TabTimer, pal.timer),
         ("Shelf", None, Tab::Shelf, Hit::TabShelf, pal.shelf),
+        ("Media", None, Tab::Media, Hit::TabMedia, pal.media),
     ];
     for (label, glyph, tab, hit, accent) in tabs {
         let rect = hd.of(tab);
@@ -257,9 +260,10 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
         let fg = if active { accent } else if v.hover == hit { pal.text2 } else { pal.muted };
         // only the open tab shows its name; the others are just the icon
         let x = if active { rect.l + 22.0 } else { rect.cx() };
-        match glyph {
-            Some(g) => r.glyph(g, F::Icon16, x, rect.cy(), color(fg, alpha)),
-            None => r.tray(x, rect.cy(), 16.0, color(fg, alpha)),
+        match (glyph, tab) {
+            (Some(g), _) => r.glyph(g, F::Icon16, x, rect.cy(), color(fg, alpha)),
+            (None, Tab::Media) => media_view::note(r, x, rect.cy(), 16.0, color(fg, alpha)),
+            (None, _) => r.tray(x, rect.cy(), 16.0, color(fg, alpha)),
         }
         if active {
             let text = RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b };

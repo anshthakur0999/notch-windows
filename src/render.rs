@@ -51,6 +51,8 @@ pub enum F {
     /// The shelf: a heading, and the big file glyph on a tile.
     Head,
     Icon24,
+    /// The track title on the Media tab (left-aligned, unlike `Head`).
+    Big,
 }
 
 pub struct Fonts {
@@ -80,6 +82,11 @@ pub struct Renderer {
     /// already asked for. Only kept while the pill is open.
     pub shelf_tex: HashMap<String, (ID2D1Bitmap1, bool)>,
     pub shelf_asked: HashSet<String>,
+    /// The cover of what is playing. Unlike the thumbnails it stays while the pill is closed: the
+    /// resting pill and the banner show it.
+    pub media_art: Option<ID2D1Bitmap1>,
+    /// The same cover, small, for the pill's covers (see `media::ART_SMALL`).
+    pub media_small: Option<ID2D1Bitmap1>,
     dpi: f32,
     /// The current colours and the scale of the clipboard-entry text (see `set_look`).
     pub pal: Palette,
@@ -225,6 +232,8 @@ impl Renderer {
                 thumbs: HashMap::new(),
                 shelf_tex: HashMap::new(),
                 shelf_asked: HashSet::new(),
+                media_art: None,
+                media_small: None,
                 dpi,
                 pal: Palette::default(),
                 text_scale: 1.0,
@@ -576,6 +585,13 @@ impl Renderer {
     /// Fills a rounded rectangle with `bmp`, scaled to cover it (centred, the overflow cropped),
     /// so the picture itself has the rounded corners.
     pub fn fill_rrect_cover(&self, bmp: &ID2D1Bitmap1, dest: D2D_RECT_F, radius: f32, opacity: f32) {
+        self.cover_with(bmp, dest, radius, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC)
+    }
+
+    /// `mode` is the filter: the high-quality cubic one is several passes on the software rasteriser,
+    /// too slow for what is redrawn many times a second, so the live cover uses linear on a copy
+    /// already near the drawn size.
+    fn cover_with(&self, bmp: &ID2D1Bitmap1, dest: D2D_RECT_F, radius: f32, opacity: f32, mode: D2D1_INTERPOLATION_MODE) {
         unsafe {
             let size = bmp.GetSize();
             if size.width <= 0.0 || size.height <= 0.0 {
@@ -597,7 +613,7 @@ impl Renderer {
             let quality = D2D1_BITMAP_BRUSH_PROPERTIES1 {
                 extendModeX: D2D1_EXTEND_MODE_CLAMP,
                 extendModeY: D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                interpolationMode: mode,
             };
             let Ok(brush) = self.dc.CreateBitmapBrush(bmp, Some(&quality), Some(&props)) else { return };
             self.dc.FillRoundedRectangle(
@@ -605,6 +621,26 @@ impl Renderer {
                 &brush,
             );
         }
+    }
+
+    /// `fill_rrect_cover`, except a small non-square picture that would be blown up past `MAX_ZOOM`
+    /// (a 150x83 video thumbnail in a 109 DIP square) is shown whole instead, over a faint copy of
+    /// itself: zooming into its middle is what made it blurry.
+    pub fn fill_rrect_art(&self, bmp: &ID2D1Bitmap1, dest: D2D_RECT_F, radius: f32, opacity: f32) {
+        const MAX_ZOOM: f32 = 1.15;
+        let size = unsafe { bmp.GetSize() };
+        let (dw, dh) = (dest.right - dest.left, dest.bottom - dest.top);
+        let zoom = (dw / size.width).max(dh / size.height);
+        let square = (size.width - size.height).abs() < size.width.max(size.height) * 0.05;
+        const LINEAR: D2D1_INTERPOLATION_MODE = D2D1_INTERPOLATION_MODE_LINEAR;
+        if size.width <= 0.0 || size.height <= 0.0 || zoom <= MAX_ZOOM || square {
+            return self.cover_with(bmp, dest, radius, opacity, LINEAR);
+        }
+        self.cover_with(bmp, dest, radius, opacity * 0.3, LINEAR);
+        let k = (dw / size.width).min(dh / size.height);
+        let (w, h) = (size.width * k, size.height * k);
+        let (l, t) = (dest.left + (dw - w) / 2.0, dest.top + (dh - h) / 2.0);
+        self.cover_with(bmp, D2D_RECT_F { left: l, top: t, right: l + w, bottom: t + h }, 5.0, opacity, LINEAR);
     }
 
     /// Returns the (cached) GPU bitmap for a thumbnail PNG, decoding it on first use.
@@ -659,6 +695,23 @@ impl Renderer {
         if let Ok(bmp) = unsafe { self.dc.CreateBitmap(size, Some(t.px.as_ptr().cast()), t.w * 4, &props) } {
             self.shelf_tex.insert(t.path, (bmp, t.icon));
         }
+    }
+
+    /// Uploads the cover the media worker decoded (`None`: there is no cover now).
+    pub fn set_media_art(&mut self, art: Option<crate::media::Cover>) {
+        let upload = |a: &crate::media::Art| {
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: ManuallyDrop::new(None),
+            };
+            let size = D2D_SIZE_U { width: a.w, height: a.h };
+            unsafe { self.dc.CreateBitmap(size, Some(a.px.as_ptr().cast()), a.w * 4, &props) }.ok()
+        };
+        let (full, small) = art.map_or((None, None), |c| (upload(&c.full), upload(&c.small)));
+        (self.media_art, self.media_small) = (full, small);
     }
 
     /// Drops GPU thumbnails and the WIC factory so a closed pill holds no extra memory.
@@ -776,6 +829,7 @@ fn make_fonts(dw: &IDWriteFactory, k: f32) -> Result<Fonts> {
         make_format(dw, ui, 32.0, sb, false)?,      // Field
         make_format(dw, ui, 22.0, sb, true)?,       // Head
         make_format(dw, icons, 24.0, n, true)?,     // Icon24
+        make_format(dw, ui, 21.0, sb, false)?,      // Big
     ];
     Ok(Fonts { v })
 }
