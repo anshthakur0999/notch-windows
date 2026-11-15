@@ -6,7 +6,8 @@ use crate::settings::{Accent, TextSize, Theme, parse_hotkey};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HBITMAP, HGDIOBJ,
+    BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, GetMonitorInfoW, HBITMAP, HGDIOBJ,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::*;
@@ -532,11 +533,65 @@ pub fn remove_foreground_hook(h: HWINEVENTHOOK) {
     }
 }
 
-/// True while a full-screen app, game or presentation is in front.
-pub fn fullscreen_app_active() -> bool {
+/// Asks the shell to post `WM_APP_FGCHANGE` when a full-screen app opens or closes (a video's F key,
+/// Esc): the window in front stays the same, so the foreground hook never hears of it. The pill only
+/// registers to be told; it takes no screen space.
+pub fn watch_fullscreen(hwnd: HWND) {
+    let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uCallbackMessage: WM_APP_FGCHANGE, ..Default::default() };
+    unsafe { SHAppBarMessage(ABM_NEW, &mut abd) };
+}
+
+pub fn unwatch_fullscreen(hwnd: HWND) {
+    let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, ..Default::default() };
+    unsafe { SHAppBarMessage(ABM_REMOVE, &mut abd) };
+}
+
+/// True while a full-screen app, game or presentation is in front of the pill's display. Windows
+/// goes on saying "full-screen app" as long as one exists, also after you switch to another window,
+/// so for those the window in front must fill the display too.
+pub fn fullscreen_app_active(pill: HWND) -> bool {
+    let Ok(s) = (unsafe { SHQueryUserNotificationState() }) else { return false };
+    s == QUNS_PRESENTATION_MODE || ((s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN) && foreground_fills_display(pill))
+}
+
+fn foreground_fills_display(pill: HWND) -> bool {
     unsafe {
-        SHQueryUserNotificationState()
-            .map(|s| s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE)
-            .unwrap_or(false)
+        let fg = GetForegroundWindow();
+        let mut class = [0u16; 32];
+        let n = GetClassNameW(fg, &mut class).max(0) as usize;
+        // the desktop fills the display too, and is not a full-screen app
+        if fg.0.is_null() || matches!(String::from_utf16_lossy(&class[..n]).as_str(), "Progman" | "WorkerW") {
+            return false;
+        }
+        let mut win = RECT::default();
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        GetWindowRect(fg, &mut win).is_ok()
+            && GetMonitorInfoW(MonitorFromWindow(pill, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool()
+            && covers(&win, &mi.rcMonitor)
+    }
+}
+
+/// `win` reaches every edge of `display` (borderless full-screen windows often overhang a little; a
+/// maximised one stops short of the taskbar).
+fn covers(win: &RECT, display: &RECT) -> bool {
+    win.left <= display.left && win.top <= display.top && win.right >= display.right && win.bottom >= display.bottom
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    #[test]
+    fn only_a_window_that_fills_the_display_is_full_screen() {
+        let display = rect(0, 0, 1920, 1080);
+        assert!(covers(&rect(0, 0, 1920, 1080), &display), "exact fit");
+        assert!(covers(&rect(-1, -1, 1921, 1081), &display), "borderless windows overhang");
+        assert!(!covers(&rect(-8, -8, 1928, 1032), &display), "maximised: stops at the taskbar");
+        assert!(!covers(&rect(1920, 0, 3840, 1080), &display), "full screen on the other display");
+        assert!(!covers(&rect(300, 200, 1000, 620), &display), "an ordinary window");
     }
 }

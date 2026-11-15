@@ -401,6 +401,7 @@ impl App {
         *self.tooltip.borrow_mut() = tip;
         shell::add_tray(self.hwnd, WM_APP_TRAY, &self.tooltip.borrow());
         self.fg_hook.set(shell::install_foreground_hook(self.hwnd));
+        shell::watch_fullscreen(self.hwnd);
         crate::dnd::register(self.hwnd);
         devices::start(self.hwnd, WM_APP_DEVICES);
     }
@@ -2721,7 +2722,7 @@ impl App {
     }
 
     fn update_fullscreen(&self) {
-        let fs = shell::fullscreen_app_active();
+        let fs = shell::fullscreen_app_active(self.hwnd);
         if fs != self.fs_hidden.get() {
             self.fs_hidden.set(fs);
             self.apply_visibility();
@@ -2941,6 +2942,7 @@ impl App {
         shell::unregister_hotkeys(self.hwnd);
         shell::remove_tray(self.hwnd);
         shell::remove_foreground_hook(self.fg_hook.get());
+        shell::unwatch_fullscreen(self.hwnd);
     }
 
     // ---------------------------------------------------- window procedure
@@ -3109,6 +3111,7 @@ impl App {
                     if msg == self.taskbar_created && msg != 0 {
                         // Explorer restarted: put the tray icon back.
                         shell::add_tray(hwnd, WM_APP_TRAY, &self.tooltip.borrow());
+                        shell::watch_fullscreen(hwnd);
                         return LRESULT(0);
                     }
                     DefWindowProcW(hwnd, msg, wp, lp)
