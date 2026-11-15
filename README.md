@@ -385,7 +385,10 @@ is kept as `notes.json.bad` rather than overwritten.
   and ends otherwise.
 * **Click-through.** The window region is clipped to the visible pill, so clicks around it reach the
   windows underneath.
-* **Hides itself** while a full-screen app or game is in front (event-driven, no polling).
+* **Hides itself** while a full-screen app or game is in front, and comes back when you switch to
+  another window or leave full screen (event-driven, no polling). Windows keeps saying "full-screen
+  app" after you switch away from one, so Notch also checks that the window in front fills the
+  pill's display.
 
 Measured on this branch (Windows 11, software rasteriser): 0.0 ms of CPU over 15 s idle with nothing
 playing, and 0.0 ms with music playing and **Bars** off; with music playing and the bars on, about
