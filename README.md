@@ -6,10 +6,11 @@
 
 [![Latest release](https://img.shields.io/github/v/release/anshthakur0999/notch-windows)](https://github.com/anshthakur0999/notch-windows/releases/latest)
 
-A tiny floating pill at the top-centre of your screen (think Dynamic Island) that holds five small
-tools: a **notepad**, a **clipboard history**, a **timer**, a **file shelf** and a **now-playing
-readout with a visualizer**. Hover it and it opens, move away and it closes. Written in Rust against
-raw Win32 + DirectComposition/Direct2D, and built to cost almost nothing while idle: one 770 KB exe,
+A tiny floating pill at the top-centre of your screen (think Dynamic Island) that holds six small
+tools: a **notepad**, a **clipboard history**, a **timer**, a **file shelf**, a **now-playing
+readout with a visualizer** and a **Bluetooth device hub**. Hover it and it opens, move away and it
+closes. Written in Rust against
+raw Win32 + DirectComposition/Direct2D, and built to cost almost nothing while idle: one 945 KB exe,
 no installer, no background polling.
 
 * **Notepad**: several auto-saved notes as tabs.
@@ -18,6 +19,10 @@ no installer, no background polling.
 * **Shelf**: park files on the pill while you work, drag them out into any app later.
 * **Media**: what is playing in any browser or music app, with its cover, play / pause, skip, seek
   and a live visualizer, on the pill itself.
+* **Devices**: when earbuds, a mouse, a keyboard or a controller connects, the pill opens a card with
+  its battery percentage and, for earbuds, a one-click **Use for audio**; the tab lists every audio
+  output (click one to switch), the connected devices with **Disconnect**, the paired ones that are
+  not connected with **Connect**, and an **Add device** screen to pair new ones.
 * **Copy peek**: every time you copy, the pill widens to say **Copied** and shows what it was.
 
 ## Install
@@ -43,7 +48,9 @@ To remove it: untick **Start with Windows**, choose **Quit** from the tray menu,
 | Start a timer | Click **Timer** in the header, type a time such as `25m`, press `Enter` |
 | Add files to the shelf | Drop them on the pill, then open the **Shelf** tab |
 | Play / pause the music | Hover the pill while something plays and press the round button on the right |
-| Switch tab | Click **Notepad** / **Clipboard** / **Timer** / **Shelf** / **Media** in the header, or press `Tab` |
+| Switch tab | Click **Notepad** / **Clipboard** / **Timer** / **Shelf** / **Media** / **Devices** in the header, or press `Tab` |
+| Switch the sound output | Click the **Devices** tab, then the output you want; or press **Use for audio** on the card that opens when earbuds connect |
+| Connect, disconnect or pair a Bluetooth device | **Devices** tab: **Disconnect** on a connected device, **Connect** on a paired one, **Add device** to pair a new one |
 | Keep open | The pin in the header: the pill stays open until you unpin it, press `Esc`, or click the chevron |
 | Close | Move the mouse away, `Esc`, the chevron, or click another app |
 | Hide / show the pill | `Win+Alt+H`, the tray menu, or the [commands](#command-line) |
@@ -159,6 +166,92 @@ samples away. Nothing is recorded, saved or sent. It listens **only while** musi
 pill is visible and the bars are on screen (the closed pill, or the Media tab); paused, hidden, on
 another tab or with **Bars** off, no audio is touched at all and no thread runs.
 
+## Devices
+
+Shows what is connected over Bluetooth and how full its battery is, and switches where the sound
+goes in one click. Notch asks Windows to tell it when a paired device connects, disconnects or
+reports a new battery value, so there is nothing to set up. What kind of device it is comes from the
+class Windows records for it when it is paired.
+
+* **The card.** When a paired earbud, headphone, mouse, keyboard or game controller connects, the
+  resting pill widens a little while an azure ring sweeps once round it, then springs open into a
+  card with the device's icon, name and battery percentage with a small bar. Earbuds and headsets
+  also get **Use for audio**, which makes them the default playback device for apps, media and calls
+  without the pill taking keyboard focus. The card stays about 4 seconds (longer while the pointer is
+  on it), the **x** closes it, and clicking anywhere else on it opens the **Devices** tab.
+* **Short banners.** After **Use for audio**: "Now the audio output". When a device disconnects:
+  "*name* disconnected", and if it was the audio output, where the sound went ("Audio back on
+  Speakers"). A device that comes back within 30 seconds gets a small "Reconnected" banner instead of
+  a full card. A battery that falls to 20%, and again to 10%, opens a **Battery low** card, with an
+  icon and the words, not only a colour. Disconnects and reconnects are announced for earbuds and
+  the like only: a mouse or keyboard that dozes off and wakes is not news (a mouse that connects after
+  more than 30 seconds away does get its card).
+* **Quiet by default.** No card for devices that were already connected when Notch started, while the
+  panel is open, while the pill is hidden or a full-screen app is in front. With Windows animation
+  effects off the ring is skipped and the card simply appears. `"device_banner": false` turns every
+  card and banner off; the tab keeps working.
+* **The Devices tab.** **Audio output** is a row of chips, one per active playback device with the
+  default one filled; click another to make it the default for all roles. **Connected** lists each
+  device with its battery and a **Disconnect** button; **Available** lists the paired devices that are
+  not connected, each with **Connect**. The lists update when a device reports a change, and the output
+  list is read when the tab opens.
+* **Connect and Disconnect** are one click, with no confirmation (nothing is lost by a wrong tap). While
+  it works the button is replaced by a ring and the row says *Connecting...* or *Disconnecting...*; the
+  row moves to the other section when Windows reports the change (a connect takes about 6 to 12
+  seconds, a disconnect under one). If the device does not answer (about 12 seconds to connect, 4 to
+  disconnect) the row says so, in red, and offers **Try again** and **Open
+  Bluetooth settings**; it stays until you try again or leave the tab. A connect you started is shown on
+  its row and does not also open the card. If the device you disconnect was the audio output, Windows
+  moves the sound back to another one and the chips show which. Disconnect keeps the pairing.
+* **Add device** searches for nearby devices that are not paired and pairs the one you pick: **Pair**,
+  then, for a keyboard, the code to type on it. The search starts when you open the screen and stops
+  when you press **Stop**, leave the screen or after 30 seconds, so nothing scans in the background.
+  It offers earbuds, headphones, speakers, mice, keyboards and gamepads (what the device says it is);
+  a device that does not say, and phones, are left to Windows' own Bluetooth settings.
+* **Bluetooth off.** The tab says so and offers **Turn on Bluetooth** (Windows may ask first) and
+  **Bluetooth settings**. With nothing paired at all it offers **Add device** instead.
+* **The visualizer follows the switch.** The Media tab's bars listen to the default output; after you
+  switch, they re-attach to the new device within about a second.
+
+**What "exact" means.** The percentage is what Windows itself reports for the device
+(`DEVPKEY_Bluetooth_Battery`, the same value Windows Settings shows), read when Windows reports it.
+When Windows has no value Notch says **Battery unknown** rather than guess. Limits you should know
+about:
+
+* AirPods and most earbuds report one value at best, and Windows does not say what it measures:
+  on some earbuds (seen on a OnePlus Buds 4) it is the case, not a bud. Left bud, right bud and
+  case separately need Apple's undocumented Bluetooth advertisements or a vendor's own protocol,
+  which Notch does not read.
+* Mice behind a vendor receiver (Logitech Unifying, Bolt), and PlayStation controllers over Bluetooth,
+  report nothing through Windows' standard property, so they show **Battery unknown**. Notch does not
+  speak vendor protocols, and it does not use `Windows.Gaming.Input`, so an Xbox controller shows
+  whatever Windows exposes for it as a Bluetooth device (coarse steps, or unknown).
+* Only devices **paired over Bluetooth** are seen (classic Bluetooth and Bluetooth LE); a USB
+  controller or one on the Xbox wireless adapter is not. Only what Windows classes as audio, mouse,
+  keyboard or gamepad is shown; phones, watches and PCs are ignored.
+* **Connect and Disconnect** work on devices Windows lists as classic Bluetooth, which includes
+  earbuds, most keyboards and many gamepads. Disconnect is the Bluetooth driver's own request to drop
+  the link (`IOCTL_BTH_DISCONNECT_DEVICE`); Windows has no call to connect, so Connect switches the
+  device's audio (or input) service off and on again, which takes Windows about six seconds and makes it
+  connect to the device. Both are what the
+  Win32 Bluetooth API offers rather than documented features, so a device that is off, out of range or
+  asleep will not answer, and a device may reconnect by itself after a disconnect (many earbuds do when
+  they are taken out of the case). After a Connect the earbuds' playback device can take 15 to 30
+  seconds to come up; the output chips follow it. Bluetooth LE devices, such as many modern mice, are connected by
+  Windows itself: they are listed, without a button. Pairings Windows keeps for a Bluetooth adapter
+  this PC no longer has are listed as paired by Windows but cannot be connected, so they are hidden.
+* **Add device** answers the two pairing requests a device without a screen makes ("pair?" and "type
+  this code on it"). A device that needs a PIN typed here, or two numbers compared, is paired from
+  Windows' Bluetooth settings. Nearby devices are listed once even when Windows sees them through both
+  Bluetooth and Bluetooth LE, and at most twelve.
+* **Use for audio** needs the device's playback device to exist, which can take a couple of seconds
+  after it connects; if there is none yet the banner says so and nothing changes. It uses
+  `IPolicyConfig`, an interface Windows does not document (the one SoundSwitch and NirCmd use), so a
+  future Windows update could break the switch; the rest of Notch does not depend on it.
+* "Audio back on ..." is a best effort: Notch checks whether the device was the default output when
+  the disconnect arrives, and where the sound went about a second later. If Windows has already moved
+  the sound by then, you get the plain "disconnected" banner.
+
 ## Copy peek
 
 Each time you copy, the collapsed pill widens into a capsule that says **Copied** and shows what it
@@ -231,6 +324,7 @@ The tray menu covers the look. Everything else is in an optional file,
 | `copy_peek` | `true` | The "Copied" capsule |
 | `copy_peek_preview` | `true` | Show what was copied in the capsule |
 | `copy_peek_ms` | `2000` | How long the capsule stays up |
+| `device_banner` | `true` | The card and banners when a Bluetooth device connects, disconnects or runs low; `false` leaves only the **Devices** tab |
 | `shelf_hours` | `24` | Files leave the shelf after this long (`0` = never) |
 | `visualizer` | `true` | The media bars move with the music (the **Bars** switch on the Media tab); `false` never samples audio |
 | `theme` | `"dark"` | `dark`, `light` or `system` |
@@ -272,6 +366,19 @@ is kept as `notes.json.bad` rather than overwritten.
 * **Media is callback-driven.** One worker thread asks Windows to call back when the track, the play
   state or the position changes, and sleeps in between; nothing polls. The cover is decoded once per
   track and kept (about 260 KB) only while something plays.
+* **Devices are callback-driven too, and cost a little all the time.** One worker thread and two Windows
+  device watchers (classic Bluetooth and Bluetooth LE) ask Windows to call back when a paired device
+  appears or connects, and a third small watcher per *connected* device reports its battery when it
+  changes; the thread sleeps in between and nothing polls, so there is no timer and no CPU while
+  nothing changes. The price is that the two main watchers run for as long as Notch does: measured on
+  this machine, about 7.5 MB more working set (2.7 MB of it private) and four more threads, with 0 ms of
+  CPU over 15 s idle (a debug test build, with nothing connected; the per-device watchers were not
+  separately measured). The Bluetooth radio's on / off state is one more callback. The playback devices
+  are read only when you open the Devices tab, press **Use for audio** or a device connects or goes.
+* **Connect, Disconnect and Add device cost something only while you use them.** A click starts a short
+  thread that waits for the answer and ends. **Add device** starts two more Windows watchers (the
+  search) that stop when you leave the screen or after 30 seconds. While a ring is turning, the
+  Devices tab redraws about 30 times a second, and not otherwise.
 * **The visualizer costs something, only while it shows.** Each redraw of the pill costs a few
   milliseconds of CPU on the software rasteriser, so the closed pill's bars update 8 times a
   second and the Media tab's 20. The listening thread starts when music plays and the bars are visible
@@ -283,7 +390,8 @@ is kept as `notes.json.bad` rather than overwritten.
 Measured on this branch (Windows 11, software rasteriser): 0.0 ms of CPU over 15 s idle with nothing
 playing, and 0.0 ms with music playing and **Bars** off; with music playing and the bars on, about
 2 to 3% of one core on the closed pill and 15 to 20% while the Media tab is open (a test track that
-never sits still; with `use_gpu` on, about 2% and 9%). About 14 MB private working set idle and 19 MB while a cover is held, a 770 KB executable.
+never sits still; with `use_gpu` on, about 2% and 9%). About 14 MB private working set idle and 19 MB while a cover is held (before the Devices watchers
+above, which add about 3 MB private), a 945 KB executable.
 
 ## Build from source
 

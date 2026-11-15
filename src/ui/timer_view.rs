@@ -419,13 +419,14 @@ pub fn draw_segment(r: &Renderer, v: &View, rect: RectF, active: bool, hovered: 
     if v.timer.phase == Phase::Idle {
         let fg = if active { pal.timer } else if hovered { pal.text2 } else { pal.muted };
         // only the open tab shows its name; the others are just the icon
-        r.glyph('\u{E916}', F::Icon16, if active { rect.l + 22.0 } else { rect.cx() }, rect.cy(), color(fg, alpha));
+        r.glyph('\u{E916}', F::Icon16, if active { rect.l + 20.0 } else { rect.cx() }, rect.cy(), color(fg, alpha));
         if active {
-            r.text("Timer", F::Seg, RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b }.d2d(), color(fg, alpha));
+            r.text("Timer", F::Seg, RectF { l: rect.l + 35.8, t: rect.t, r: rect.r - 4.0, b: rect.b }.d2d(), color(fg, alpha));
         }
     } else {
         let digits = if active { pal.timer } else if hovered { pal.text } else { pal.text2 };
-        draw_chip(r, &v.timer, rect.l + 15.5, rect.cy(), pal.timer, digits, alpha);
+        // centred in the segment, whatever the readout's length ("14:32", "1:24:58")
+        draw_chip(r, &v.timer, rect.cx() - chip_width(r, &v.timer) / 2.0, rect.cy(), pal.timer, digits, alpha);
     }
 }
 
@@ -653,19 +654,20 @@ mod tests {
     }
 
     #[test]
-    fn the_header_has_room_for_five_tabs_and_the_buttons() {
-        let expect = [Hit::TabNotes, Hit::TabClip, Hit::TabTimer, Hit::TabShelf, Hit::TabMedia];
+    fn the_header_has_room_for_six_tabs_and_the_buttons() {
+        let expect = [Hit::TabNotes, Hit::TabClip, Hit::TabTimer, Hit::TabShelf, Hit::TabMedia, Hit::TabDevices];
         for open in Tab::ALL {
             for timer_on in [false, true] {
                 let h = header(open, timer_on);
                 assert!(h.seg.windows(2).all(|w| w[0].r < w[1].l), "{open:?}: tabs do not touch");
-                assert!(h.seg[4].r <= h.bg.r && h.bg.r < btn_pin().l, "{open:?}: the track ends before the pin");
+                assert!(h.seg[5].r <= h.bg.r && h.bg.r < btn_pin().l, "{open:?}: the track ends before the pin");
+                assert!(h.seg.iter().all(|s| s.w() >= 35.9), "{open:?}: even an icon-only tab is wide enough to hit");
                 for (i, t) in Tab::ALL.into_iter().enumerate() {
                     let c = h.of(t);
                     assert_eq!(hit_test_tab(open, timer_on, c.cx(), c.cy()), expect[i], "{open:?} timer_on={timer_on} {t:?}");
                 }
                 // the open tab is wide enough for its name, a running timer for "1:24:58"
-                assert!(h.of(open).w() >= 82.0 && (!timer_on || h.of(Tab::Timer).w() >= 96.0));
+                assert!(h.of(open).w() >= 77.9 && (!timer_on || h.of(Tab::Timer).w() >= 82.9));
             }
         }
     }
@@ -685,6 +687,8 @@ mod tests {
             shelf_n: 0,
             media: false,
             seekable: false,
+            dev: Default::default(),
+            card_buttons: false,
         };
         hit_test(x, y, &ctx)
     }

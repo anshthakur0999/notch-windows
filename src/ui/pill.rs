@@ -101,6 +101,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
         Capsule::Drop => shelf_view::draw_drop(r, pill),
         Capsule::Added => shelf_view::draw_added(r, v, pill),
         Capsule::Track => media_view::draw_banner(r, v, pill),
+        Capsule::Device => devices_view::draw_card(r, v, pill),
         Capsule::None => {}
     }
 
@@ -116,6 +117,7 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
             Tab::Timer => timer_view::draw(r, v, alpha),
             Tab::Shelf => shelf_view::draw(r, v, alpha),
             Tab::Media => media_view::draw(r, v, alpha),
+            Tab::Devices => devices_tab::draw(r, v, alpha),
         }
         r.pop_clip();
     }
@@ -243,6 +245,7 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
         ("Timer", Some('\u{E916}'), Tab::Timer, Hit::TabTimer, pal.timer),
         ("Shelf", None, Tab::Shelf, Hit::TabShelf, pal.shelf),
         ("Media", None, Tab::Media, Hit::TabMedia, pal.media),
+        ("Devices", Some('\u{E702}'), Tab::Devices, Hit::TabDevices, pal.device),
     ];
     for (label, glyph, tab, hit, accent) in tabs {
         let rect = hd.of(tab);
@@ -259,14 +262,14 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
         }
         let fg = if active { accent } else if v.hover == hit { pal.text2 } else { pal.muted };
         // only the open tab shows its name; the others are just the icon
-        let x = if active { rect.l + 22.0 } else { rect.cx() };
+        let x = if active { rect.l + 20.0 } else { rect.cx() };
         match (glyph, tab) {
             (Some(g), _) => r.glyph(g, F::Icon16, x, rect.cy(), color(fg, alpha)),
             (None, Tab::Media) => media_view::note(r, x, rect.cy(), 16.0, color(fg, alpha)),
             (None, _) => r.tray(x, rect.cy(), 16.0, color(fg, alpha)),
         }
         if active {
-            let text = RectF { l: rect.l + 37.8, t: rect.t, r: rect.r - 4.0, b: rect.b };
+            let text = RectF { l: rect.l + 35.8, t: rect.t, r: rect.r - 4.0, b: rect.b };
             r.text(label, F::Seg, text.d2d(), color(fg, alpha));
         }
     }

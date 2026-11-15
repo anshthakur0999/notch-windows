@@ -20,17 +20,25 @@ use crate::ui::notes_view::{self, NoteTabs};
 use crate::shelf::Shelf;
 use crate::timer::{self, Phase, Timer};
 use crate::ui::timer_view::PRESETS;
+use crate::audio;
+use crate::devices::{self, Device, Event};
 use crate::media::{self, Cmd, Media, Track};
+use crate::policy;
 use crate::ui::{
-    self, COLLAPSED_H, COLLAPSED_W, Capsule, EXPANDED_H, EXPANDED_W, ADDED_W, DROP_W, Hit, HitCtx, MediaView, PEEK_H, PEEK_TIMER_W, PeekView,
-    ShelfView, TIMES_UP_W, TRACK_W, Tab, TimerField, TimerView, View, WIN_H, WIN_W, hover_w, rest_w,
+    self, COLLAPSED_H, COLLAPSED_W, CARD_W, Capsule, CardView, DevicesView, EXPANDED_H, EXPANDED_W, ADDED_W, DROP_W, Hit, HitCtx, MediaView,
+    NOTICE_MIN_W, PEEK_H, PEEK_TIMER_W, PeekView, SPARK_H, SPARK_W, ShelfView, TIMES_UP_W, TRACK_W, Tab, TimerField, TimerView, View, WIN_H,
+    WIN_W, hover_w, rest_w,
 };
+use crate::pair;
+use crate::ui::devices_tab::{self, Links, Row, Rows, Screen};
+use crate::ui::devices_view::{Card, Notice, NoticeKind};
 use crate::ui::{media_view, shelf_view};
 use crate::viz::{self, Listener};
 use crate::window;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::ValidateRect;
@@ -52,6 +60,8 @@ pub const WM_APP_THUMB: u32 = WM_APP + 6;
 /// The media worker has a new snapshot; the visualizer's bars have moved.
 pub const WM_APP_MEDIA: u32 = WM_APP + 7;
 pub const WM_APP_VIZ: u32 = WM_APP + 8;
+/// The devices worker has a new list or something to say (a device connected, a battery ran low).
+pub const WM_APP_DEVICES: u32 = WM_APP + 9;
 
 // All timers are one-shot: nothing ticks while the pill is idle.
 const T_DWELL: usize = 1;
@@ -69,6 +79,44 @@ const T_SHELF: usize = 8;
 const T_TRACK: usize = 9;
 /// The Media tab's time labels are due a second tick.
 const T_MEDIA: usize = 10;
+/// The device card moves on to its next stage (the ring is done and it opens; it has been up long
+/// enough).
+const T_DEVICE: usize = 11;
+/// A device that was the audio output disconnected a moment ago: Windows has moved the sound by now.
+const T_GONE: usize = 12;
+/// A ring is turning on the Devices tab (a connect, a search, a pairing): redraw it.
+const T_SPIN: usize = 13;
+
+/// How long the device capsule sweeps its ring before it opens, and how long the card and the short
+/// notices stay up (longer while the pointer is on them).
+const SPARK_MS: u32 = 150;
+const CARD_HOLD_MS: u32 = 4000;
+const NOTICE_HOLD_MS: u32 = 2800;
+const GONE_WAIT_MS: u32 = 900;
+/// After a device connects or goes, the Devices tab reads the playback devices again, up to this
+/// many times (first quickly, then slowly: after a Connect the earbuds' playback device can take
+/// half a minute to come up), and stops as soon as every connected audio device has one.
+const OUT_REREADS: u8 = 18;
+const OUT_REREAD_MS: u32 = 1500;
+const OUT_REREAD_SLOW_MS: u32 = 4000;
+
+/// The device card on show, and where it is in its life.
+struct DevCard {
+    card: Card,
+    since: Instant,
+    /// This card opens with the ring (a new connection does; the rest just widen), and whether it
+    /// is still in that opening.
+    spark: bool,
+    sparking: bool,
+    hold_ms: u32,
+}
+
+impl DevCard {
+    /// The capsule's size now: the short one for the opening, then the card's own.
+    fn size(&self) -> (f32, f32) {
+        if self.sparking { (SPARK_W, SPARK_H) } else { self.card.size() }
+    }
+}
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -82,6 +130,12 @@ pub fn install(app: App) -> Rc<App> {
 
 pub fn uninstall() {
     APP.with(|a| *a.borrow_mut() = None);
+}
+
+/// Seconds since the first ring was drawn: what the spinners turn by.
+fn clock() -> f32 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
 /// Runs `f` with the app, if it exists yet (window messages can arrive during creation).
@@ -193,6 +247,21 @@ pub struct App {
     track_toast: Cell<bool>,
     media_seen: Cell<bool>,
     viz: RefCell<Option<Listener>>,
+    /// Bluetooth devices: what is connected, the playback devices (read when the Devices tab
+    /// shows them), the card on the collapsed pill, and a disconnect that was the audio output,
+    /// waiting for Windows to move the sound before it says where it went.
+    devs: RefCell<Vec<Device>>,
+    outputs: RefCell<Vec<audio::Output>>,
+    /// The width of each output's chip; the paired devices that are not connected; the connects and
+    /// disconnects started from the tab; which screen it is on; what the Add screen found.
+    out_w: RefCell<Vec<f32>>,
+    out_retry: Cell<u8>,
+    avail: RefCell<Vec<Device>>,
+    links: RefCell<Links>,
+    screen: Cell<Screen>,
+    pairs: RefCell<pair::Snapshot>,
+    devcard: RefCell<Option<DevCard>>,
+    gone: RefCell<Option<Device>>,
 
     renderer: RefCell<Option<Renderer>>,
     pub store: RefCell<Store>,
@@ -280,6 +349,16 @@ impl App {
             track_toast: Cell::new(false),
             media_seen: Cell::new(false),
             viz: RefCell::new(None),
+            devs: RefCell::new(Vec::new()),
+            outputs: RefCell::new(Vec::new()),
+            out_w: RefCell::new(Vec::new()),
+            out_retry: Cell::new(0),
+            avail: RefCell::new(Vec::new()),
+            links: RefCell::new(Links::default()),
+            screen: Cell::new(Screen::List),
+            pairs: RefCell::new(pair::Snapshot::default()),
+            devcard: RefCell::new(None),
+            gone: RefCell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
             notes,
@@ -323,6 +402,7 @@ impl App {
         shell::add_tray(self.hwnd, WM_APP_TRAY, &self.tooltip.borrow());
         self.fg_hook.set(shell::install_foreground_hook(self.hwnd));
         crate::dnd::register(self.hwnd);
+        devices::start(self.hwnd, WM_APP_DEVICES);
     }
 
     pub fn is_animating(&self) -> bool {
@@ -696,6 +776,7 @@ impl App {
             self.shelf_toast.get().is_some(),
             self.track.borrow().is_some(),
             self.track_toast.get(),
+            self.devcard.borrow().is_some(),
         )
     }
 
@@ -708,6 +789,7 @@ impl App {
             Capsule::Drop => (DROP_W, PEEK_H),
             Capsule::Added => (ADDED_W, PEEK_H),
             Capsule::Track => (TRACK_W, PEEK_H),
+            Capsule::Device => self.devcard.borrow().as_ref().map_or((SPARK_W, SPARK_H), DevCard::size),
             Capsule::None => (rest_w(timer, media, shelf), COLLAPSED_H),
         }
     }
@@ -926,6 +1008,357 @@ impl App {
                 self.invalidate();
             }
             _ => {}
+        }
+    }
+
+    // --------------------------------------------------------------- devices
+
+    /// `WM_APP_DEVICES`: the worker has a new list of connected devices and maybe news.
+    fn on_devices(&self) {
+        let list = devices::list();
+        // a card still up shows the battery as it arrives (it usually follows the connection)
+        if let Some(c) = self.devcard.borrow_mut().as_mut() {
+            if let Card::Connected(d) | Card::Low(d) = &mut c.card {
+                if let Some(n) = list.iter().find(|n| n.name == d.name) {
+                    d.battery = n.battery;
+                }
+            }
+        }
+        *self.devs.borrow_mut() = list;
+        *self.avail.borrow_mut() = devices::available();
+        let on_tab = self.open.get() && self.tab.get() == Tab::Devices;
+        if on_tab {
+            self.refresh_outputs();
+        }
+        let now = Instant::now();
+        let mut moved = false;
+        for ev in devices::take_events() {
+            crate::log(&format!("devices: {ev:?}"));
+            moved |= matches!(ev, Event::Connected { .. } | Event::Disconnected(_));
+            match ev {
+                Event::Link { dev, connect, ok } => {
+                    if let Some(addr) = dev.addr {
+                        self.links.borrow_mut().finish(addr, connect, ok, now);
+                    }
+                }
+                // a connect the user asked for shows on its row of the tab; it is not announced
+                Event::Connected { dev, .. } if self.links.borrow().ours(dev.addr, now) => {}
+                Event::Connected { dev, back: false } => self.show_device_card(Card::Connected(dev)),
+                // a mouse or keyboard that dozes off and wakes is not news; earbuds coming back are
+                Event::Connected { dev, back: true } if dev.kind.is_audio() => {
+                    let name = dev.name.clone();
+                    self.show_notice(NoticeKind::Back, dev.kind, name, Some("Reconnected".into()));
+                }
+                Event::Connected { back: true, .. } => {}
+                Event::Low(dev) => self.show_device_card(Card::Low(dev)),
+                Event::Disconnected(dev) => self.on_device_gone(dev),
+            }
+        }
+        if on_tab && moved {
+            // Windows moves the sound to another output a moment after a device goes, and a new
+            // one's playback device turns up a few seconds after it connects: look again a few times
+            // shortcut: re-reads on a short schedule; an IMMNotificationClient would say exactly when
+            self.out_retry.set(OUT_REREADS);
+            unsafe {
+                SetTimer(Some(self.hwnd), T_GONE, GONE_WAIT_MS, None);
+            }
+        }
+        self.sync_pairing();
+        self.links.borrow_mut().prune(now);
+        self.spin_clock();
+        self.invalidate();
+    }
+
+    /// The Add screen follows what the pairing worker found; it ends when a pairing worked or
+    /// Bluetooth went off.
+    fn sync_pairing(&self) {
+        if self.screen.get() != Screen::Add {
+            return;
+        }
+        if !devices::bluetooth_on() || pair::take_paired() {
+            self.close_add();
+        } else {
+            *self.pairs.borrow_mut() = pair::snapshot();
+        }
+    }
+
+    /// What the Devices tab lists right now, as owned data (`.shape()` borrows it).
+    fn tab_rows(&self) -> Rows {
+        let now = Instant::now();
+        let (links, pairs) = (self.links.borrow(), self.pairs.borrow());
+        let near = pairs
+            .nearby
+            .iter()
+            .map(|n| {
+                let busy = pairs.pairing.as_deref() == Some(n.id.as_str());
+                let failed = pairs.failed.as_deref() == Some(n.id.as_str());
+                (if busy { Row::Busy } else if failed { Row::Failed } else { Row::Idle }, busy && pairs.code.is_some())
+            })
+            .collect();
+        Rows {
+            screen: self.screen.get(),
+            off: !devices::bluetooth_on(),
+            chips: self.out_w.borrow().clone(),
+            conn: self.devs.borrow().iter().map(|d| links.row(d.addr, false, now)).collect(),
+            avail: self.avail.borrow().iter().map(|d| links.row(d.addr, true, now)).collect(),
+            near,
+        }
+    }
+
+    /// Keeps the ring turning (about 30 times a second) only while one is on show: a connect or
+    /// disconnect under way, a search, a pairing. Otherwise nothing ticks.
+    fn spin_clock(&self) {
+        let pairs = self.pairs.borrow();
+        let on_add = self.screen.get() == Screen::Add && (pairs.searching || pairs.pairing.is_some());
+        let wanted = self.open.get() && self.tab.get() == Tab::Devices && (on_add || self.links.borrow().busy(Instant::now()));
+        unsafe {
+            if wanted {
+                SetTimer(Some(self.hwnd), T_SPIN, 33, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), T_SPIN);
+            }
+        }
+    }
+
+    /// Connect (`connect`: from the Available list) or Disconnect (from the Connected one), or
+    /// "Try again" on either.
+    fn on_link_click(&self, i: usize, connect: bool) {
+        let dev = if connect { self.avail.borrow().get(i).cloned() } else { self.devs.borrow().get(i).cloned() };
+        let Some(dev) = dev else { return };
+        let Some(addr) = dev.addr else { return };
+        crate::log(&format!("link click: {} {}", if connect { "connect" } else { "disconnect" }, dev.name));
+        self.links.borrow_mut().start(addr, connect);
+        devices::link(dev, connect);
+        self.spin_clock();
+        self.invalidate();
+    }
+
+    /// "Add device": the search starts, and only now.
+    fn open_add(&self) {
+        if !devices::bluetooth_on() {
+            return;
+        }
+        self.screen.set(Screen::Add);
+        self.scroll.set(0.0);
+        self.hover.set(Hit::None);
+        pair::start_search();
+        *self.pairs.borrow_mut() = pair::snapshot();
+        self.spin_clock();
+        self.invalidate();
+    }
+
+    /// Back to the lists: the search stops, a pairing is cancelled.
+    fn close_add(&self) {
+        pair::close();
+        self.screen.set(Screen::List);
+        self.scroll.set(0.0);
+        self.hover.set(Hit::None);
+        *self.pairs.borrow_mut() = pair::Snapshot::default();
+        self.spin_clock();
+        self.invalidate();
+    }
+
+    /// Leaving the tab (another tab, or the panel folding): failures do not follow, the search ends.
+    fn leave_devices(&self) {
+        self.links.borrow_mut().clear_failed();
+        if self.screen.get() == Screen::Add {
+            self.close_add();
+        }
+    }
+
+    /// Stop, or Search again.
+    fn on_add_stop(&self) {
+        if self.pairs.borrow().searching {
+            pair::stop_search();
+        } else if self.pairs.borrow().pairing.is_none() {
+            pair::start_search();
+        }
+        *self.pairs.borrow_mut() = pair::snapshot();
+        self.spin_clock();
+        self.invalidate();
+    }
+
+    fn on_add_pair(&self, i: usize) {
+        let id = self.pairs.borrow().nearby.get(i).map(|n| n.id.clone());
+        if let Some(id) = id {
+            pair::pair(&id);
+            *self.pairs.borrow_mut() = pair::snapshot();
+            self.spin_clock();
+            self.invalidate();
+        }
+    }
+
+    fn on_add_cancel(&self) {
+        pair::cancel();
+        *self.pairs.borrow_mut() = pair::snapshot();
+        self.spin_clock();
+        self.invalidate();
+    }
+
+    /// Reads the playback devices again (the Devices tab shows them).
+    fn refresh_outputs(&self) {
+        let outs = audio::outputs();
+        let widths = match self.renderer.borrow().as_ref() {
+            Some(r) => outs.iter().map(|o| devices_tab::chip_width(r.measure(F::Seg, devices_tab::chip_label(o)))).collect(),
+            None => vec![120.0; outs.len()],
+        };
+        if crate::log_enabled() {
+            crate::log(&format!("outputs: {:?}", outs.iter().map(|o| format!("{} ({}){}", o.name, o.sub, if o.default { "*" } else { "" })).collect::<Vec<_>>()));
+        }
+        *self.out_w.borrow_mut() = widths;
+        *self.outputs.borrow_mut() = outs;
+    }
+
+    /// The card is for the closed pill, when nothing is in the way of it and the setting is on. A
+    /// new connection opens with the ring; with reduced motion in Windows it just appears.
+    fn show_device_card(&self, card: Card) {
+        if !self.cfg().device_banner || self.open.get() || self.is_hidden() || self.peek.borrow().is_some() {
+            return;
+        }
+        let reduced = shell::reduced_motion();
+        let spark = matches!(card, Card::Connected(_)) && !reduced;
+        let hold_ms = if matches!(card, Card::Notice(_)) { NOTICE_HOLD_MS } else { CARD_HOLD_MS };
+        *self.devcard.borrow_mut() = Some(DevCard { card, since: Instant::now(), spark, sparking: spark, hold_ms });
+        unsafe {
+            SetTimer(Some(self.hwnd), T_DEVICE, if spark { SPARK_MS } else { hold_ms }, None);
+        }
+        self.to_rest();
+        if reduced {
+            let (mut w, mut h) = (self.w.get(), self.h.get());
+            w.snap();
+            h.snap();
+            self.w.set(w);
+            self.h.set(h);
+            window::set_region(self.hwnd, self.dpi.get(), w.pos, h.pos);
+        }
+        self.invalidate();
+    }
+
+    /// A short notice, its width fitted to its text.
+    fn show_notice(&self, kind: NoticeKind, icon: devices::Kind, title: String, sub: Option<String>) {
+        let w = {
+            let r = self.renderer.borrow();
+            let Some(r) = r.as_ref() else { return };
+            let text = r.measure(F::Seg, &title).max(sub.as_deref().map_or(0.0, |s| r.measure(F::Hint, s)));
+            (54.0 + text + if kind == NoticeKind::Switched { 36.0 } else { 14.0 }).clamp(NOTICE_MIN_W, CARD_W)
+        };
+        self.show_device_card(Card::Notice(Notice { kind, icon, title, sub, w }));
+    }
+
+    /// `T_DEVICE`: the ring is done, so the card opens; or the card has been up long enough, so it
+    /// folds back, unless the pointer is on it.
+    fn device_stage(&self) {
+        let hold = {
+            let mut slot = self.devcard.borrow_mut();
+            let Some(c) = slot.as_mut() else { return };
+            if c.sparking {
+                c.sparking = false;
+                Some(c.hold_ms)
+            } else {
+                None
+            }
+        };
+        if let Some(ms) = hold {
+            unsafe {
+                SetTimer(Some(self.hwnd), T_DEVICE, ms, None);
+            }
+            self.to_rest(); // the card's size
+            self.invalidate();
+        } else if self.cursor_in_pill() {
+            unsafe {
+                SetTimer(Some(self.hwnd), T_DEVICE, 250, None); // look again shortly
+            }
+        } else {
+            self.device_clear();
+        }
+    }
+
+    /// Takes the card down (it ran out, the x, the panel opened, the pill was hidden).
+    fn device_clear(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), T_DEVICE);
+        }
+        let had = self.devcard.borrow_mut().take().is_some();
+        if had {
+            self.settle_capsule();
+            self.invalidate();
+        }
+    }
+
+    /// "Use for audio": make the earbuds' playback device the default, and say whether that worked.
+    fn on_device_use(&self) {
+        let dev = match self.devcard.borrow().as_ref().map(|c| &c.card) {
+            Some(Card::Connected(d)) => d.clone(),
+            _ => return,
+        };
+        let outs = audio::outputs();
+        let ok = audio::output_for(&dev.name, &outs).is_some_and(|o| policy::set_default(&o.id));
+        crate::log(&format!("use for audio: {} -> {ok}", dev.name));
+        let (kind, sub) = if ok { (NoticeKind::Switched, "Now the audio output") } else { (NoticeKind::Gone, "No audio output for it yet") };
+        self.show_notice(kind, dev.kind, dev.name, Some(sub.into()));
+    }
+
+    /// A device disconnected. If it was the sound's way out, Windows moves the sound to another
+    /// device a moment later: wait for that before saying where it went.
+    fn on_device_gone(&self, dev: Device) {
+        // only earbuds and the like are announced: a mouse that dozes off is not news
+        if !self.cfg().device_banner || !dev.kind.is_audio() {
+            return;
+        }
+        // shortcut: if Windows has already moved the sound by the time the disconnect arrives, this
+        // says "no" and the plain banner shows; fix by remembering the default as it changes
+        let was_output = audio::outputs().iter().any(|o| o.default && audio::output_for(&dev.name, std::slice::from_ref(o)).is_some());
+        if was_output {
+            *self.gone.borrow_mut() = Some(dev);
+            unsafe {
+                SetTimer(Some(self.hwnd), T_GONE, GONE_WAIT_MS, None);
+            }
+        } else {
+            let title = format!("{} disconnected", dev.name);
+            self.show_notice(NoticeKind::Gone, dev.kind, title, None);
+        }
+    }
+
+    /// `T_GONE`: the disconnect that was the audio output, with where the sound went.
+    fn gone_resolved(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), T_GONE);
+        }
+        self.refresh_outputs();
+        self.invalidate();
+        // done once every connected audio device has its playback device (a disconnect has none to wait for)
+        let waiting = {
+            let outs = self.outputs.borrow();
+            self.devs.borrow().iter().any(|d| d.kind.is_audio() && audio::output_for(&d.name, &outs).is_none())
+        };
+        let left = self.out_retry.get();
+        if left > 0 && waiting && self.open.get() && self.tab.get() == Tab::Devices {
+            self.out_retry.set(left - 1);
+            unsafe {
+                SetTimer(Some(self.hwnd), T_GONE, if left > OUT_REREADS / 2 { OUT_REREAD_MS } else { OUT_REREAD_SLOW_MS }, None);
+            }
+        } else {
+            self.out_retry.set(0);
+        }
+        let Some(dev) = self.gone.borrow_mut().take() else { return };
+        let outs = audio::outputs();
+        let back = outs.iter().find(|o| o.default).filter(|o| audio::output_for(&dev.name, std::slice::from_ref(o)).is_none());
+        let sub = back.map(|o| format!("Audio back on {}", o.name));
+        self.show_notice(NoticeKind::Gone, dev.kind, format!("{} disconnected", dev.name), sub);
+    }
+
+    /// A click on an audio output of the Devices tab: it becomes the default.
+    fn on_output_click(&self, i: usize) {
+        let Some(id) = self.outputs.borrow().get(i).filter(|o| !o.default).map(|o| o.id.clone()) else { return };
+        crate::log(&format!("set default output: {}", policy::set_default(&id)));
+        self.refresh_outputs();
+        self.invalidate();
+    }
+
+    /// The empty Devices tab's button: Windows' own Bluetooth page.
+    fn open_bt_settings(&self) {
+        unsafe {
+            windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), w!("ms-settings:bluetooth"), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
         }
     }
 
@@ -1192,6 +1625,9 @@ impl App {
                 levels: if self.viz.borrow().is_some() { viz::levels() } else { [0.0; viz::BANDS] },
                 bars_on: self.cfg().visualizer,
             });
+            let (devs, outputs, devcard) = (self.devs.borrow(), self.outputs.borrow(), self.devcard.borrow());
+            let (avail, pairs, rows) = (self.avail.borrow(), self.pairs.borrow(), self.tab_rows());
+            let card = devcard.as_ref().map(|c| CardView { card: &c.card, age: c.since.elapsed().as_secs_f32(), spark: c.spark });
             let (timer_input, timer_label) = (self.timer_input.borrow(), self.timer_label.borrow());
             let (tnow, parsed) = (Instant::now(), timer::parse(&timer_input));
             let ends = shell::clock_after(if timer.phase() == Phase::Idle { parsed.unwrap_or(0) } else { timer.left_secs(tnow) });
@@ -1230,6 +1666,17 @@ impl App {
                 },
                 shelf: ShelfView { items: shelf.items(), drag_over: self.drag_over.get(), toast: self.shelf_toast.get() },
                 media,
+                devices: DevicesView {
+                    shape: rows.shape(),
+                    outputs: &outputs,
+                    conn: &devs,
+                    avail: &avail,
+                    near: &pairs.nearby,
+                    code: pairs.code.as_deref(),
+                    searching: pairs.searching,
+                    clock: clock(),
+                },
+                card,
             };
             match ui::pill::draw(r, &view) {
                 Ok(()) => false,
@@ -1345,8 +1792,12 @@ impl App {
         self.hover_peek.set(false);
         self.shelf_toast_clear();
         self.track_toast_clear();
+        self.device_clear();
         if self.tab.get() == Tab::Shelf {
             self.shelf_refresh();
+        }
+        if self.tab.get() == Tab::Devices {
+            self.refresh_outputs(); // the default may have changed since the tab was last open
         }
         self.open.set(true);
         self.relayout_tabs(true); // show the active note's tab even if the row is scrolled elsewhere
@@ -1411,6 +1862,9 @@ impl App {
             return;
         }
         self.finish_rename(false);
+        if self.tab.get() == Tab::Devices {
+            self.leave_devices();
+        }
         unsafe {
             let ours = self.is_ours(GetForegroundWindow());
 
@@ -1432,6 +1886,7 @@ impl App {
             self.to_rest(); // the plain pill, or the "Time's up" capsule if the time ran out
             self.sync_viz();
             self.media_clock();
+            self.spin_clock();
 
             if ours {
                 let prev = self.prev_fg.get();
@@ -1453,12 +1908,18 @@ impl App {
             return;
         }
         self.finish_rename(false);
+        if self.tab.get() == Tab::Devices {
+            self.leave_devices();
+        }
         self.tab.set(t);
         self.scroll.set(0.0);
         self.hover.set(Hit::None);
         self.sel.set(None);
         if t == Tab::Shelf {
             self.shelf_refresh();
+        }
+        if t == Tab::Devices {
+            self.refresh_outputs();
         }
         if t == Tab::Notes {
             if self.expanded() {
@@ -1472,6 +1933,7 @@ impl App {
         }
         self.sync_viz();
         self.media_clock();
+        self.spin_clock();
         self.invalidate();
     }
 
@@ -1542,6 +2004,7 @@ impl App {
         let tabs = self.tabs.borrow();
         let empty = NoteTabs::empty();
         let Some(list) = list.as_ref() else { return Hit::None };
+        let rows = self.tab_rows();
         ui::hit_test(
             x,
             y,
@@ -1558,6 +2021,8 @@ impl App {
                 shelf_n: self.shelf.borrow().len(),
                 media: self.track.borrow().is_some(),
                 seekable: self.track.borrow().as_ref().is_some_and(|t| t.seekable),
+                dev: rows.shape(),
+                card_buttons: self.devcard.borrow().as_ref().is_some_and(|c| c.card.has_buttons() && !c.sparking),
             },
         )
     }
@@ -1660,6 +2125,9 @@ impl App {
                 Hit::Pill if self.capsule() == Capsule::TimesUp => self.open_sticky(Some(Tab::Timer)),
                 Hit::Pill if self.capsule() == Capsule::Added => self.open_sticky(Some(Tab::Shelf)),
                 Hit::Pill if self.capsule() == Capsule::Track => self.open_sticky(Some(Tab::Media)),
+                Hit::Pill if self.capsule() == Capsule::Device => self.open_sticky(Some(Tab::Devices)),
+                Hit::DeviceUse => self.on_device_use(),
+                Hit::DeviceClose => self.device_clear(),
                 Hit::Pill => self.open_sticky(None),
                 Hit::PeekNotes => self.open_sticky(Some(Tab::Notes)),
                 Hit::PeekClip => self.open_sticky(Some(Tab::Clipboard)),
@@ -1679,6 +2147,17 @@ impl App {
             Hit::TabTimer => self.set_tab(Tab::Timer),
             Hit::TabShelf => self.set_tab(Tab::Shelf),
             Hit::TabMedia => self.set_tab(Tab::Media),
+            Hit::TabDevices => self.set_tab(Tab::Devices),
+            Hit::OutputRow(i) => self.on_output_click(i),
+            Hit::BtSettings => self.open_bt_settings(),
+            Hit::DeviceDisconnect(i) => self.on_link_click(i, false),
+            Hit::DeviceConnect(i) => self.on_link_click(i, true),
+            Hit::AddOpen => self.open_add(),
+            Hit::BtOn => devices::turn_on(),
+            Hit::AddBack => self.close_add(),
+            Hit::AddStop => self.on_add_stop(),
+            Hit::AddPair(i) => self.on_add_pair(i),
+            Hit::AddCancel => self.on_add_cancel(),
             h @ (Hit::MediaPlay | Hit::MediaPrev | Hit::MediaNext | Hit::MediaSeek | Hit::MediaStyle) => self.on_media_click(h, x),
             h @ (Hit::ShelfTile(_) | Hit::ShelfSlot | Hit::ShelfClear) => self.on_shelf_click(h, x, y),
             h @ (Hit::TimerField
@@ -1786,6 +2265,14 @@ impl App {
         }
         if self.expanded() && self.tab.get() == Tab::Shelf {
             let max = shelf_view::max_scroll(self.shelf.borrow().len());
+            self.scroll.set((self.scroll.get() - delta as f32 / 120.0 * 60.0).clamp(0.0, max));
+            let (x, y) = self.mouse.get();
+            self.hover.set(self.hit_at(x, y));
+            self.invalidate();
+            return;
+        }
+        if self.expanded() && self.tab.get() == Tab::Devices {
+            let max = devices_tab::max_scroll(&self.tab_rows().shape());
             self.scroll.set((self.scroll.get() - delta as f32 / 120.0 * 60.0).clamp(0.0, max));
             let (x, y) = self.mouse.get();
             self.hover.set(self.hit_at(x, y));
@@ -2214,6 +2701,12 @@ impl App {
             T_TIMER => self.timer_tick(),
             T_SHELF => self.shelf_toast_clear(),
             T_TRACK => self.track_toast_clear(),
+            T_DEVICE => self.device_stage(),
+            T_GONE => self.gone_resolved(),
+            T_SPIN => {
+                self.invalidate();
+                self.spin_clock();
+            }
             T_MEDIA => {
                 self.media_clock();
                 self.invalidate();
@@ -2245,6 +2738,7 @@ impl App {
         let visible = unsafe { IsWindowVisible(self.hwnd).as_bool() };
         if self.is_hidden() && visible {
             self.peek_clear();
+            self.device_clear();
             self.collapse();
             // jump straight to the collapsed size so nothing animates while hidden
             let mut w = self.w.get();
@@ -2545,6 +3039,10 @@ impl App {
                 }
                 WM_APP_MEDIA => {
                     self.on_media();
+                    LRESULT(0)
+                }
+                WM_APP_DEVICES => {
+                    self.on_devices();
                     LRESULT(0)
                 }
                 WM_APP_VIZ => {

@@ -344,6 +344,35 @@ impl Renderer {
         }
     }
 
+    /// A bright arc (about a third of the outline) running round a rounded rectangle: `p` (0..1) is
+    /// how far round it has got, so a sweep from 0 to 1 goes once all the way round. It is a single
+    /// dash of a stroke style made for the call; this only runs for the 150 ms of a device card's
+    /// opening.
+    pub fn sweep_rrect(&self, r: D2D_RECT_F, radius: f32, c: D2D1_COLOR_F, width: f32, p: f32) {
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        let rad = radius.min(w / 2.0).min(h / 2.0);
+        let perimeter = 2.0 * (w - 2.0 * rad) + 2.0 * (h - 2.0 * rad) + std::f32::consts::TAU * rad;
+        let arc = 0.33 * perimeter;
+        unsafe {
+            let props = D2D1_STROKE_STYLE_PROPERTIES1 {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 10.0,
+                dashStyle: D2D1_DASH_STYLE_CUSTOM,
+                dashOffset: -p * perimeter / width, // in stroke widths, like the dashes
+                transformType: D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+            };
+            // the dash and its gap add up to the perimeter, so the pattern wraps round exactly once
+            let dashes = [arc / width, (perimeter - arc) / width];
+            let Ok(style) = self.d2d.CreateStrokeStyle(&props, Some(&dashes)) else { return };
+            let Ok(style) = style.cast::<ID2D1StrokeStyle>() else { return };
+            self.brush.SetColor(&c);
+            self.dc.DrawRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }, &self.brush, width, Some(&style));
+        }
+    }
+
     pub fn fill_circle(&self, cx: f32, cy: f32, rad: f32, c: D2D1_COLOR_F) {
         unsafe {
             self.brush.SetColor(&c);
@@ -482,17 +511,23 @@ impl Renderer {
     /// `sweep` degrees (a full turn is drawn as a plain ring). One path, so a translucent colour
     /// does not double up where pieces would overlap. Built once a second at most: the timer ring.
     pub fn arc(&self, cx: f32, cy: f32, radius: f32, width: f32, c: D2D1_COLOR_F, sweep: f32) {
+        self.arc_from(cx, cy, radius, width, c, 0.0, sweep);
+    }
+
+    /// `arc`, starting `start` degrees clockwise from 12 o'clock: a turning spinner is one of these
+    /// with `start` growing.
+    pub fn arc_from(&self, cx: f32, cy: f32, radius: f32, width: f32, c: D2D1_COLOR_F, start: f32, sweep: f32) {
         if sweep <= 0.0 {
             return;
         }
         if sweep >= 359.9 {
             return self.ring(cx, cy, radius, width, c);
         }
-        let a = sweep.to_radians();
+        let (a0, a) = (start.to_radians(), (start + sweep).to_radians());
         unsafe {
             let Ok(geom) = self.d2d.CreatePathGeometry() else { return };
             let Ok(sink) = geom.Open() else { return };
-            sink.BeginFigure(Vector2 { X: cx, Y: cy - radius }, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.BeginFigure(Vector2 { X: cx + radius * a0.sin(), Y: cy - radius * a0.cos() }, D2D1_FIGURE_BEGIN_HOLLOW);
             sink.AddArc(&D2D1_ARC_SEGMENT {
                 point: Vector2 { X: cx + radius * a.sin(), Y: cy - radius * a.cos() },
                 size: D2D_SIZE_F { width: radius, height: radius },
