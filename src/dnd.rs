@@ -6,7 +6,8 @@
 
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, POINTL, S_OK};
 use windows::Win32::System::Com::{
-    CoTaskMemFree, DVASPECT_CONTENT, FORMATETC, IBindCtx, IDataObject, TYMED_HGLOBAL,
+    CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, DVASPECT_CONTENT, FORMATETC, IBindCtx, IDataObject,
+    TYMED_HGLOBAL,
 };
 use windows::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT, DROPEFFECT_COPY,
@@ -15,8 +16,11 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-use windows::Win32::UI::Shell::{BHID_DataObject, DragQueryFileW, HDROP, SHCreateShellItemArrayFromIDLists, SHParseDisplayName};
-use windows::core::{BOOL, HRESULT, PCWSTR, Ref, Result, implement};
+use windows::Win32::UI::Shell::{
+    BHID_DataObject, DragQueryFileW, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FileOpenDialog, HDROP,
+    IFileOpenDialog, SHCreateShellItemArrayFromIDLists, SHParseDisplayName, SIGDN_FILESYSPATH,
+};
+use windows::core::{BOOL, HRESULT, PCWSTR, Ref, Result, implement, w};
 
 /// The format a file drop carries: a list of paths.
 fn hdrop() -> FORMATETC {
@@ -53,6 +57,30 @@ fn paths(data: &IDataObject) -> Vec<String> {
         let list = paths_from_hdrop(HDROP(medium.u.hGlobal.0));
         ReleaseStgMedium(&mut medium);
         list
+    }
+}
+
+/// Asks the user for files with the standard open dialog (modal over `owner`). Empty if cancelled.
+/// Files only: a folder is added by dropping it. Shortcuts are taken as themselves, like a drop.
+pub fn pick_files(owner: HWND) -> Vec<String> {
+    unsafe {
+        let Ok(dlg) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return Vec::new() };
+        let Ok(opts) = dlg.GetOptions() else { return Vec::new() };
+        let _ = dlg.SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_NODEREFERENCELINKS);
+        let _ = dlg.SetTitle(w!("Add to shelf"));
+        if dlg.Show(Some(owner)).is_err() {
+            return Vec::new(); // cancelled
+        }
+        let Ok(items) = dlg.GetResults() else { return Vec::new() };
+        let n = items.GetCount().unwrap_or(0);
+        (0..n)
+            .filter_map(|i| {
+                let name = items.GetItemAt(i).ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+                let path = name.to_string().ok();
+                CoTaskMemFree(Some(name.0.cast()));
+                path
+            })
+            .collect()
     }
 }
 

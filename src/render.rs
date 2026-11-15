@@ -568,7 +568,8 @@ impl Renderer {
 
     pub fn draw_bitmap(&self, bmp: &ID2D1Bitmap1, dest: D2D_RECT_F, opacity: f32) {
         unsafe {
-            self.dc.DrawBitmap(bmp, Some(&dest), opacity, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            // cubic, which also filters properly when shrinking a big picture; plain linear aliases
+            self.dc.DrawBitmap(bmp, Some(&dest), opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, None, None);
         }
     }
 
@@ -593,7 +594,12 @@ impl Renderer {
                     M32: dest.top + (dh - size.height * s) / 2.0,
                 },
             };
-            let Ok(brush) = self.dc.CreateBitmapBrush(bmp, None, Some(&props)) else { return };
+            let quality = D2D1_BITMAP_BRUSH_PROPERTIES1 {
+                extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                interpolationMode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            };
+            let Ok(brush) = self.dc.CreateBitmapBrush(bmp, Some(&quality), Some(&props)) else { return };
             self.dc.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT { rect: dest, radiusX: radius, radiusY: radius },
                 &brush,

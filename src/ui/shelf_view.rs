@@ -24,10 +24,6 @@ const GRID_TOP: f32 = 100.0;
 pub fn summary() -> RectF {
     at(20.0, 56.0, 250.0, 36.0)
 }
-/// The handle that drags every file out at once.
-pub fn drag_all_btn() -> RectF {
-    at(284.0, 56.0, 92.0, 36.0)
-}
 pub fn clear_btn() -> RectF {
     at(382.0, 56.0, 50.0, 36.0)
 }
@@ -40,10 +36,20 @@ pub fn tile(i: usize, scroll: f32) -> RectF {
     let (col, row) = (i % COLS, i / COLS);
     at(14.0 + col as f32 * (TILE_W + GAP_X), GRID_TOP + row as f32 * PITCH_Y - scroll, TILE_W, TILE_H)
 }
-/// Centre of the round badge on a tile's top-right corner: the tick when it is selected, the x
-/// that removes it when the file is missing.
+/// Centre of the x on a tile's top-right corner that removes it from the shelf (shown while the
+/// tile is hovered, or always when the file is missing).
 pub fn badge(t: RectF) -> (f32, f32) {
     (t.r - 20.0, t.t + 20.0)
+}
+/// Centre of the tick on a tile's top-left corner, shown while it is selected.
+fn tick_badge(t: RectF) -> (f32, f32) {
+    (t.l + 20.0, t.t + 20.0)
+}
+/// Draws the remove x at `t`'s badge.
+fn x_badge(r: &Renderer, t: RectF, alpha: f32) {
+    let (bx, by) = badge(t);
+    r.fill_circle(bx, by, 10.0, color(r.pal.rest, 0.92 * alpha));
+    r.glyph('\u{E711}', F::Icon12, bx, by, color(r.pal.text, alpha));
 }
 /// How far the grid can scroll for `n` files (the last tile is the "drop files here" slot).
 pub fn max_scroll(n: usize) -> f32 {
@@ -61,12 +67,13 @@ pub fn hit(x: f32, y: f32, scroll: f32, n: usize) -> Option<Hit> {
     if n == 0 {
         return None;
     }
-    if drag_all_btn().contains(x, y) {
-        Some(Hit::ShelfDragAll)
-    } else if clear_btn().contains(x, y) {
+    if clear_btn().contains(x, y) {
         Some(Hit::ShelfClear)
     } else if viewport().contains(x, y) {
-        (0..n).find(|&i| tile(i, scroll).contains(x, y)).map(Hit::ShelfTile)
+        (0..n)
+            .find(|&i| tile(i, scroll).contains(x, y))
+            .map(Hit::ShelfTile)
+            .or_else(|| (n < MAX_FILES && tile(n, scroll).contains(x, y)).then_some(Hit::ShelfSlot))
     } else {
         None
     }
@@ -88,8 +95,6 @@ pub fn draw(r: &Renderer, v: &View, alpha: f32) {
     r.text(hint, F::Hint, RectF { l: p.l + 20.0, t: cy - 9.0, r: p.l + 300.0, b: cy + 9.0 }.d2d(), color(r.pal.muted, alpha));
     if empty {
         pill::collapse_hint(r, cy, alpha);
-    } else {
-        pill::key_hint(r, "Del", "removes from shelf", cy, alpha);
     }
 }
 
@@ -123,14 +128,6 @@ fn draw_grid(r: &Renderer, v: &View, alpha: f32) {
         r.text(&format!("\u{00B7} {missing} missing"), F::Tab, RectF { l: s.l + cw + 8.0, ..s }.d2d(), color(pal.muted, alpha));
     }
 
-    let b = drag_all_btn();
-    r.fill_rrect(b.d2d(), b.h() / 2.0, color(lit(r, mix(pal.body, pal.shelf, 0.2), v.hover == Hit::ShelfDragAll), alpha));
-    for dx in [-2.4f32, 2.4] {
-        for dy in [-4.6f32, 0.0, 4.6] {
-            r.fill_circle(b.l + 20.0 + dx, b.cy() + dy, 1.25, color(pal.shelf, alpha));
-        }
-    }
-    r.text("Drag all", F::Seg, RectF { l: b.l + 34.0, r: b.r - 6.0, ..b }.d2d(), color(pal.shelf, alpha));
     let c = clear_btn();
     centred(r, "Clear", F::Seg, c, color(if v.hover == Hit::ShelfClear { pal.text } else { pal.muted }, alpha));
 
@@ -183,9 +180,7 @@ fn draw_tile(r: &Renderer, v: &View, it: &Item, i: usize, t: RectF, alpha: f32) 
         centred(r, "Missing", F::Seg, RectF { t: thumb.cy() + 8.0, b: thumb.cy() + 28.0, ..thumb }, color(pal.muted, alpha));
         r.text(it.name(), F::Seg, name.d2d(), color(pal.muted, alpha));
         r.text("Moved or deleted", F::Hint, meta.d2d(), color(pal.faint, alpha));
-        let (bx, by) = badge(t);
-        r.fill_circle(bx, by, 10.0, color(pal.rest, 0.92 * alpha));
-        r.glyph('\u{E711}', F::Icon12, bx, by, color(pal.text, alpha));
+        x_badge(r, t, alpha);
         return;
     }
 
@@ -207,14 +202,17 @@ fn draw_tile(r: &Renderer, v: &View, it: &Item, i: usize, t: RectF, alpha: f32) 
     r.text(&sub, F::Hint, meta.d2d(), color(pal.muted, alpha));
     if sel {
         r.stroke_rrect(t.inset(1.0).d2d(), 13.0, color(pal.shelf, alpha), 2.0);
-        tick(r, badge(t), alpha);
+        tick(r, tick_badge(t), alpha);
+    }
+    if hovered {
+        x_badge(r, t, alpha);
     }
 }
 
 /// The last tile: a dashed "drop files here" slot.
 fn draw_slot(r: &Renderer, v: &View, t: RectF, alpha: f32) {
     let pal = r.pal;
-    let a = if v.shelf.drag_over { 0.9 } else { 0.5 };
+    let a = if v.shelf.drag_over || v.hover == Hit::ShelfSlot { 0.9 } else { 0.5 };
     r.dashed_rrect(t.inset(1.0).d2d(), 14.0, color(pal.shelf, a * alpha), 1.5);
     let (cx, cy) = (t.cx(), t.t + 48.0);
     r.line(cx - 8.0, cy, cx + 8.0, cy, color(pal.shelf, alpha), 2.0);
@@ -304,8 +302,8 @@ mod tests {
         }
         assert!(tile(0, 0.0).b < tile(COLS, 0.0).t, "rows do not touch");
         // the row under the header sits above the first tiles
-        assert!(summary().b <= tile(0, 0.0).t && drag_all_btn().r < clear_btn().l && clear_btn().r <= p.r - 6.0);
-        assert!(summary().r <= drag_all_btn().l, "the file count has room");
+        assert!(summary().b <= tile(0, 0.0).t && clear_btn().r <= p.r - 6.0);
+        assert!(summary().r <= clear_btn().l, "the file count has room");
     }
 
     #[test]
@@ -317,16 +315,23 @@ mod tests {
         }
         let (a, b) = (tile(0, 0.0), tile(1, 0.0));
         assert_eq!(hit((a.r + b.l) / 2.0, a.cy(), 0.0, n), None, "between two tiles");
-        // the slot after the last file is not a tile
+        // the slot after the last file is the "add files" button, until the shelf is full
         let slot = tile(n, 0.0);
-        assert_eq!(hit(slot.cx(), slot.cy(), 0.0, n), None);
+        assert_eq!(hit(slot.cx(), slot.cy(), 0.0, n), Some(Hit::ShelfSlot));
         // scrolled out of view (under the header row) a tile cannot be hit
         let t = tile(0, 60.0);
         assert!(t.t < viewport().t);
         assert_eq!(hit(t.cx(), t.t + 4.0, 60.0, n), None);
-        assert_eq!(hit(drag_all_btn().cx(), drag_all_btn().cy(), 0.0, n), Some(Hit::ShelfDragAll));
         assert_eq!(hit(clear_btn().cx(), clear_btn().cy(), 0.0, n), Some(Hit::ShelfClear));
-        assert_eq!(hit(drag_all_btn().cx(), drag_all_btn().cy(), 0.0, 0), None, "no buttons on an empty shelf");
+        assert_eq!(hit(clear_btn().cx(), clear_btn().cy(), 0.0, 0), None, "no buttons on an empty shelf");
+    }
+
+    #[test]
+    fn the_remove_x_and_the_tick_sit_in_opposite_corners_of_the_tile() {
+        let t = tile(0, 0.0);
+        let ((xx, xy), (tx, ty)) = (badge(t), tick_badge(t));
+        assert!(xx > t.cx() && tx < t.cx() && xy == ty, "x top-right, tick top-left");
+        assert!(t.contains(xx, xy) && t.contains(tx, ty));
     }
 
     #[test]

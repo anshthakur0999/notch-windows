@@ -192,11 +192,6 @@ impl Shelf {
         let takes = |x: &Item| !x.missing && if start.selected { x.selected } else { std::ptr::eq(x, start) };
         self.items.iter().filter(|x| takes(x)).map(|x| x.path.clone()).collect()
     }
-
-    /// Everything that is still there, for "Drag all".
-    pub fn all_present(&self) -> Vec<String> {
-        self.items.iter().filter(|i| !i.missing).map(|i| i.path.clone()).collect()
-    }
 }
 
 #[cfg(test)]
@@ -282,9 +277,9 @@ mod tests {
         s.refresh();
         assert_eq!(s.missing(), 1);
         assert!(s.items()[1].missing);
-        // dragging the gone file takes nothing; "drag all" takes the rest
+        // dragging the gone file takes nothing, and a present one still goes
         assert!(s.drag_set(1).is_empty());
-        assert_eq!(s.all_present().len(), 2);
+        assert_eq!(s.drag_set(0).len(), 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 
