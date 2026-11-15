@@ -93,35 +93,72 @@ pub fn hit(x: f32, y: f32, phase: Phase) -> Option<Hit> {
 
 // ---------------------------------------------------------------- capsule geometry
 
-/// The hover capsule, laid out from the capsule's own rectangle `p`. Without the shelf: notepad
-/// button, pause / resume ring, the time, clipboard button. With files on the shelf the capsule is
-/// wider and reads: notepad, clipboard, shelf, ring, time.
+/// The hover capsule, laid out from the capsule's own rectangle `p`. With a timer and nothing else:
+/// notepad button, pause / resume ring, the time, clipboard button; with files on the shelf the
+/// capsule is wider and reads notepad, clipboard, shelf, ring, time. Media adds its buttons at the
+/// right end (the cover, which opens the Media tab, and play / pause); with no timer it is notepad,
+/// clipboard, shelf if any, then the cover, the title and artist, and play / pause.
 struct HoverLayout {
     notes: (f32, f32),
-    ring: (f32, f32),
-    time: RectF,
     clip: (f32, f32),
     shelf: Option<(f32, f32)>,
+    /// The timer's ring and its time (only while a timer runs).
+    ring: Option<(f32, f32)>,
+    time: Option<RectF>,
+    media: Option<MediaLayout>,
+}
+
+struct MediaLayout {
+    art: (f32, f32),
+    /// Where the title and artist fit (not beside a timer).
+    words: Option<RectF>,
+    play: (f32, f32),
 }
 const BTN_R: f32 = 17.0;
 
-fn hover_layout(p: RectF, shelf: bool) -> HoverLayout {
+fn hover_layout(p: RectF, shelf: bool, timer: bool, media: bool) -> HoverLayout {
     let cy = p.cy();
-    if shelf {
-        HoverLayout {
-            notes: (p.l + 23.0, cy),
-            clip: (p.l + 63.0, cy),
-            shelf: Some((p.l + 103.0, cy)),
-            ring: (p.l + 143.0, cy),
-            time: RectF { l: p.l + 164.0, t: p.t, r: p.r - 6.0, b: p.b },
-        }
-    } else {
-        HoverLayout {
-            notes: (p.l + 23.0, cy),
-            ring: (p.l + 63.0, cy),
-            time: RectF { l: p.l + 84.0, t: p.t, r: p.l + 166.0, b: p.b },
+    let at = |dx: f32| (p.l + dx, cy);
+    match (timer, media) {
+        (true, false) if shelf => HoverLayout {
+            notes: at(23.0),
+            clip: at(63.0),
+            shelf: Some(at(103.0)),
+            ring: Some(at(143.0)),
+            time: Some(RectF { l: p.l + 164.0, t: p.t, r: p.r - 6.0, b: p.b }),
+            media: None,
+        },
+        (true, false) => HoverLayout {
+            notes: at(23.0),
+            ring: Some(at(63.0)),
+            time: Some(RectF { l: p.l + 84.0, t: p.t, r: p.l + 166.0, b: p.b }),
             clip: (p.r - 23.0, cy),
             shelf: None,
+            media: None,
+        },
+        _ => {
+            // notepad, clipboard, then the shelf button if there are files
+            let mut dx = 103.0;
+            let shelf_c = shelf.then(|| at(dx));
+            if shelf {
+                dx += 40.0;
+            }
+            let (ring, time, art, words) = if timer {
+                // the ring and its time (room for "1:24:58"), then the cover; there is no room for the title
+                let time = RectF { l: p.l + dx + 21.0, t: p.t, r: p.l + dx + 77.0, b: p.b };
+                (Some(at(dx)), Some(time), at(dx + 77.0 + 22.0), None)
+            } else {
+                (None, None, at(dx), Some(RectF { l: p.l + dx + 23.0, t: p.t, r: p.r - 23.0 - BTN_R - 6.0, b: p.b }))
+            };
+            let play = if timer { (art.0 + 40.0, cy) } else { (p.r - 23.0, cy) };
+            HoverLayout {
+                notes: at(23.0),
+                clip: at(63.0),
+                shelf: shelf_c,
+                ring,
+                time,
+                media: Some(MediaLayout { art, words, play }),
+            }
         }
     }
 }
@@ -130,18 +167,26 @@ fn within(c: (f32, f32), r: f32, x: f32, y: f32) -> bool {
     (x - c.0).hypot(y - c.1) <= r
 }
 
-pub fn hover_hit(p: RectF, x: f32, y: f32, shelf: bool) -> Hit {
-    let l = hover_layout(p, shelf);
+pub fn hover_hit(p: RectF, x: f32, y: f32, shelf: bool, timer: bool, media: bool) -> Hit {
+    let l = hover_layout(p, shelf, timer, media);
     if within(l.notes, BTN_R, x, y) {
         Hit::PeekNotes
     } else if l.shelf.is_some_and(|c| within(c, BTN_R, x, y)) {
         Hit::PeekShelf
-    } else if within(l.ring, BTN_R, x, y) {
+    } else if l.ring.is_some_and(|c| within(c, BTN_R, x, y)) {
         Hit::PeekRing
     } else if within(l.clip, BTN_R, x, y) {
         Hit::PeekClip
-    } else if l.time.contains(x, y) {
+    } else if l.time.is_some_and(|t| t.contains(x, y)) {
         Hit::PeekTime
+    } else if let Some(m) = &l.media {
+        if within(m.play, BTN_R, x, y) {
+            Hit::PeekPlay
+        } else if within(m.art, BTN_R, x, y) || m.words.is_some_and(|w| w.contains(x, y)) {
+            Hit::PeekArt
+        } else {
+            Hit::Pill
+        }
     } else {
         Hit::Pill
     }
@@ -402,28 +447,45 @@ pub fn grown(pill: RectF, target: f32) -> f32 {
     smoothstep(0.5, 1.0, (pill.w() - COLLAPSED_W) / (target - COLLAPSED_W))
 }
 
-/// Hover capsule: notepad button, pause / resume ring, the time, clipboard button.
+/// Hover capsule: notepad button, pause / resume ring, the time, clipboard button; media's buttons
+/// join them (see `HoverLayout`).
 pub fn draw_hover(r: &Renderer, v: &View, pill: RectF) {
     let shelf = v.shelf.items.len();
-    let a = grown(pill, if shelf > 0 { HOVER_SHELF_W } else { HOVER_W });
+    let (pal, t) = (r.pal, &v.timer);
+    let a = grown(pill, hover_w(t.active(), shelf > 0, v.media.is_some()));
     if a < 0.02 {
         return;
     }
-    let (pal, t) = (r.pal, &v.timer);
-    let l = hover_layout(pill, shelf > 0);
+    let l = hover_layout(pill, shelf > 0, t.active(), v.media.is_some());
     let tint = |accent: u32, hovered: bool| lit(r, mix(pal.rest, accent, 0.22), hovered);
 
     r.fill_circle(l.notes.0, l.notes.1, BTN_R, color(tint(pal.notes, v.hover == Hit::PeekNotes), a));
     r.glyph('\u{E8A5}', F::Icon14, l.notes.0, l.notes.1, color(pal.notes, a));
 
-    r.fill_circle(l.ring.0, l.ring.1, BTN_R, color(lit(r, pal.tile, v.hover == Hit::PeekRing), a));
-    r.ring(l.ring.0, l.ring.1, 15.0, 2.2, color(pal.wash, 0.16 * a));
-    r.arc(l.ring.0, l.ring.1, 15.0, 2.2, color(pal.timer, a), t.frac * 360.0);
-    r.glyph(if t.phase == Phase::Paused { '\u{F5B0}' } else { '\u{F8AE}' }, F::Icon12, l.ring.0, l.ring.1, color(pal.text, a));
+    if let (Some(ring), Some(time)) = (l.ring, l.time) {
+        r.fill_circle(ring.0, ring.1, BTN_R, color(lit(r, pal.tile, v.hover == Hit::PeekRing), a));
+        r.ring(ring.0, ring.1, 15.0, 2.2, color(pal.wash, 0.16 * a));
+        r.arc(ring.0, ring.1, 15.0, 2.2, color(pal.timer, a), t.frac * 360.0);
+        r.glyph(if t.phase == Phase::Paused { '\u{F5B0}' } else { '\u{F8AE}' }, F::Icon12, ring.0, ring.1, color(pal.text, a));
 
-    let digits = if t.phase == Phase::Paused { pal.muted } else { pal.text };
-    let s = clock(t.left);
-    r.clock_text(&s, F::ClockSm, l.time.l + 4.0, pill.cy(), color(digits, a));
+        let digits = if t.phase == Phase::Paused { pal.muted } else { pal.text };
+        let s = clock(t.left);
+        r.clock_text(&s, F::ClockSm, time.l + 4.0, pill.cy(), color(digits, a));
+    }
+
+    if let (Some(m), Some(ml)) = (&v.media, &l.media) {
+        media_view::draw_hover_art(r, ml.art, matches!(v.hover, Hit::PeekArt), a);
+        if let Some(w) = ml.words {
+            let cy = pill.cy();
+            let line = |dy: f32| RectF { t: cy + dy, b: cy + dy + 18.0, ..w };
+            r.text(&m.track.title, F::Seg, line(-19.0).d2d(), color(pal.text, a));
+            let sub = if m.track.artist.is_empty() { &m.track.source } else { &m.track.artist };
+            r.text(sub, F::Hint, line(0.0).d2d(), color(pal.muted, a));
+        }
+        r.fill_circle(ml.play.0, ml.play.1, BTN_R, color(tint(pal.media, v.hover == Hit::PeekPlay), a));
+        let glyph = if m.track.playing { '\u{F8AE}' } else { '\u{F5B0}' };
+        r.glyph(glyph, F::Icon12, ml.play.0, ml.play.1, color(pal.media, a));
+    }
 
     r.fill_circle(l.clip.0, l.clip.1, BTN_R, color(tint(pal.clip, v.hover == Hit::PeekClip), a));
     r.glyph('\u{E77F}', F::Icon14, l.clip.0, l.clip.1, color(pal.clip, a));
@@ -518,27 +580,29 @@ mod tests {
     #[test]
     fn the_capsule_buttons_are_where_they_are_drawn() {
         let p = pill_rect(HOVER_W, PEEK_H);
-        let l = hover_layout(p, false);
-        assert_eq!(hover_hit(p, l.notes.0, l.notes.1, false), Hit::PeekNotes);
-        assert_eq!(hover_hit(p, l.ring.0, l.ring.1, false), Hit::PeekRing);
-        assert_eq!(hover_hit(p, l.clip.0, l.clip.1, false), Hit::PeekClip);
-        assert_eq!(hover_hit(p, l.time.cx(), p.cy(), false), Hit::PeekTime);
-        assert_eq!(hover_hit(p, l.time.r + 5.0, p.cy(), false), Hit::Pill, "elsewhere on the capsule opens the panel");
+        let l = hover_layout(p, false, true, false);
+        let (ring, time) = (l.ring.expect("a ring"), l.time.expect("a time"));
+        assert_eq!(hover_hit(p, l.notes.0, l.notes.1, false, true, false), Hit::PeekNotes);
+        assert_eq!(hover_hit(p, ring.0, ring.1, false, true, false), Hit::PeekRing);
+        assert_eq!(hover_hit(p, l.clip.0, l.clip.1, false, true, false), Hit::PeekClip);
+        assert_eq!(hover_hit(p, time.cx(), p.cy(), false, true, false), Hit::PeekTime);
+        assert_eq!(hover_hit(p, time.r + 5.0, p.cy(), false, true, false), Hit::Pill, "elsewhere on the capsule opens the panel");
         // everything fits inside the capsule, with the time clear of both buttons
         assert!(l.notes.0 - BTN_R >= p.l && l.clip.0 + BTN_R <= p.r);
-        assert!(l.ring.0 + BTN_R < l.time.l && l.time.r < l.clip.0 - BTN_R);
+        assert!(ring.0 + BTN_R < time.l && time.r < l.clip.0 - BTN_R);
 
         // with files on the shelf the capsule has a shelf button and reads notepad, clipboard, shelf, ring, time
         let p = pill_rect(HOVER_SHELF_W, PEEK_H);
-        let l = hover_layout(p, true);
+        let l = hover_layout(p, true, true, false);
+        let (ring, time) = (l.ring.expect("a ring"), l.time.expect("a time"));
         let shelf = l.shelf.expect("a shelf button");
-        assert_eq!(hover_hit(p, shelf.0, shelf.1, true), Hit::PeekShelf);
-        assert_eq!(hover_hit(p, l.clip.0, l.clip.1, true), Hit::PeekClip);
-        assert_eq!(hover_hit(p, l.ring.0, l.ring.1, true), Hit::PeekRing);
-        assert_ne!(hover_hit(p, shelf.0, shelf.1, false), Hit::PeekShelf, "no shelf button without files");
-        let xs = [l.notes.0, l.clip.0, shelf.0, l.ring.0];
+        assert_eq!(hover_hit(p, shelf.0, shelf.1, true, true, false), Hit::PeekShelf);
+        assert_eq!(hover_hit(p, l.clip.0, l.clip.1, true, true, false), Hit::PeekClip);
+        assert_eq!(hover_hit(p, ring.0, ring.1, true, true, false), Hit::PeekRing);
+        assert_ne!(hover_hit(p, shelf.0, shelf.1, false, true, false), Hit::PeekShelf, "no shelf button without files");
+        let xs = [l.notes.0, l.clip.0, shelf.0, ring.0];
         assert!(xs.windows(2).all(|w| w[0] + 2.0 * BTN_R < w[1]), "the four buttons do not touch");
-        assert!(l.notes.0 - BTN_R >= p.l && l.ring.0 + BTN_R < l.time.l && l.time.r <= p.r);
+        assert!(l.notes.0 - BTN_R >= p.l && ring.0 + BTN_R < time.l && time.r <= p.r);
 
         let p = pill_rect(TIMES_UP_W, PEEK_H);
         let l = times_up_layout(p);
@@ -549,13 +613,53 @@ mod tests {
     }
 
     #[test]
-    fn the_header_has_room_for_four_tabs_and_the_buttons() {
-        let expect = [Hit::TabNotes, Hit::TabClip, Hit::TabTimer, Hit::TabShelf];
+    fn media_in_the_hover_capsule_has_its_buttons_apart_and_inside() {
+        for (timer, shelf) in [(true, false), (true, true), (false, false), (false, true)] {
+            let p = pill_rect(hover_w(timer, shelf, true), PEEK_H);
+            let l = hover_layout(p, shelf, timer, true);
+            let m = l.media.as_ref().expect("media buttons");
+            let hit = |c: (f32, f32)| hover_hit(p, c.0, c.1, shelf, timer, true);
+            assert_eq!(hit(m.art), Hit::PeekArt, "timer={timer} shelf={shelf}");
+            assert_eq!(hit(m.play), Hit::PeekPlay, "timer={timer} shelf={shelf}");
+            assert_eq!(hit(l.notes), Hit::PeekNotes);
+            assert_eq!(hit(l.clip), Hit::PeekClip);
+            if let Some(c) = l.shelf {
+                assert_eq!(hit(c), Hit::PeekShelf);
+            }
+            if let Some(c) = l.ring {
+                assert_eq!(hit(c), Hit::PeekRing);
+            }
+            // left to right with room between: notepad, clipboard, [shelf], [ring, time], cover, [words], play
+            let mut xs = vec![l.notes.0, l.clip.0];
+            xs.extend(l.shelf.map(|c| c.0));
+            xs.extend(l.ring.map(|c| c.0));
+            xs.push(m.art.0);
+            xs.push(m.play.0);
+            assert!(xs.windows(2).all(|w| w[0] + BTN_R < w[1] - BTN_R + 0.1), "{xs:?} do not touch");
+            assert!(l.notes.0 - BTN_R >= p.l && m.play.0 + BTN_R <= p.r, "inside the capsule");
+            if let Some(t) = l.time {
+                assert!(l.ring.unwrap().0 + BTN_R < t.l && t.r <= m.art.0 - BTN_R, "the time clears the ring and the cover");
+            }
+            if let Some(w) = m.words {
+                assert!(w.l >= m.art.0 + BTN_R && w.r <= m.play.0 - BTN_R && w.w() >= 100.0, "room for the title: {w:?}");
+                assert_eq!(hit((w.cx(), p.cy())), Hit::PeekArt, "the title opens the Media tab too");
+            } else {
+                assert!(timer, "only beside a timer is there no room for the title");
+            }
+        }
+        // without media the capsule is the timer's and has nothing to press for it
+        let p = pill_rect(HOVER_W, PEEK_H);
+        assert!(hover_layout(p, false, true, false).media.is_none());
+    }
+
+    #[test]
+    fn the_header_has_room_for_five_tabs_and_the_buttons() {
+        let expect = [Hit::TabNotes, Hit::TabClip, Hit::TabTimer, Hit::TabShelf, Hit::TabMedia];
         for open in Tab::ALL {
             for timer_on in [false, true] {
                 let h = header(open, timer_on);
                 assert!(h.seg.windows(2).all(|w| w[0].r < w[1].l), "{open:?}: tabs do not touch");
-                assert!(h.seg[3].r <= h.bg.r && h.bg.r < btn_pin().l, "{open:?}: the track ends before the pin");
+                assert!(h.seg[4].r <= h.bg.r && h.bg.r < btn_pin().l, "{open:?}: the track ends before the pin");
                 for (i, t) in Tab::ALL.into_iter().enumerate() {
                     let c = h.of(t);
                     assert_eq!(hit_test_tab(open, timer_on, c.cx(), c.cy()), expect[i], "{open:?} timer_on={timer_on} {t:?}");
@@ -579,6 +683,8 @@ mod tests {
             timer: if timer_on { Phase::Running } else { Phase::Idle },
             capsule: Capsule::None,
             shelf_n: 0,
+            media: false,
+            seekable: false,
         };
         hit_test(x, y, &ctx)
     }

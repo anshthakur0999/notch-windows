@@ -20,11 +20,13 @@ use crate::ui::notes_view::{self, NoteTabs};
 use crate::shelf::Shelf;
 use crate::timer::{self, Phase, Timer};
 use crate::ui::timer_view::PRESETS;
+use crate::media::{self, Cmd, Media, Track};
 use crate::ui::{
-    self, COLLAPSED_H, COLLAPSED_W, Capsule, EXPANDED_H, EXPANDED_W, ADDED_W, DROP_W, HOVER_SHELF_W, HOVER_W, Hit, HitCtx, PEEK_H, PEEK_TIMER_W, PeekView,
-    ShelfView, TIMES_UP_W, Tab, TimerField, TimerView, View, WIN_H, WIN_W,
+    self, COLLAPSED_H, COLLAPSED_W, Capsule, EXPANDED_H, EXPANDED_W, ADDED_W, DROP_W, Hit, HitCtx, MediaView, PEEK_H, PEEK_TIMER_W, PeekView,
+    ShelfView, TIMES_UP_W, TRACK_W, Tab, TimerField, TimerView, View, WIN_H, WIN_W, hover_w, rest_w,
 };
-use crate::ui::shelf_view;
+use crate::ui::{media_view, shelf_view};
+use crate::viz::{self, Listener};
 use crate::window;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -47,6 +49,9 @@ pub const WM_APP_FGCHANGE: u32 = WM_APP + 4;
 /// Sent by `notch.exe hide|show|toggle|quit`; `wParam` is a `cli::CMD_*` code.
 pub const WM_APP_COMMAND: u32 = WM_APP + 5;
 pub const WM_APP_THUMB: u32 = WM_APP + 6;
+/// The media worker has a new snapshot; the visualizer's bars have moved.
+pub const WM_APP_MEDIA: u32 = WM_APP + 7;
+pub const WM_APP_VIZ: u32 = WM_APP + 8;
 
 // All timers are one-shot: nothing ticks while the pill is idle.
 const T_DWELL: usize = 1;
@@ -60,6 +65,10 @@ const T_PEEK: usize = 6;
 const T_TIMER: usize = 7;
 /// The "Added 3 files" toast has been up long enough.
 const T_SHELF: usize = 8;
+/// The "now playing" banner has been up long enough.
+const T_TRACK: usize = 9;
+/// The Media tab's time labels are due a second tick.
+const T_MEDIA: usize = 10;
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -176,6 +185,14 @@ pub struct App {
     dragging_out: Cell<bool>,
     shelf_toast: Cell<Option<(usize, usize)>>,
     press: Cell<Option<(Hit, i32, i32)>>,
+    /// Live media: the worker that follows Windows' media session, what it last reported, the
+    /// "now playing" banner, whether a snapshot has been seen yet (what already played at launch
+    /// gets no banner), and the visualizer's listener (only while it has something to draw).
+    media: Media,
+    track: RefCell<Option<Track>>,
+    track_toast: Cell<bool>,
+    media_seen: Cell<bool>,
+    viz: RefCell<Option<Listener>>,
 
     renderer: RefCell<Option<Renderer>>,
     pub store: RefCell<Store>,
@@ -258,6 +275,11 @@ impl App {
             dragging_out: Cell::new(false),
             shelf_toast: Cell::new(None),
             press: Cell::new(None),
+            media: Media::start(hwnd, WM_APP_MEDIA),
+            track: RefCell::new(None),
+            track_toast: Cell::new(false),
+            media_seen: Cell::new(false),
+            viz: RefCell::new(None),
             renderer: RefCell::new(Some(renderer)),
             store: RefCell::new(store),
             notes,
@@ -672,17 +694,21 @@ impl App {
             self.hover_peek.get(),
             self.drag_over.get(),
             self.shelf_toast.get().is_some(),
+            self.track.borrow().is_some(),
+            self.track_toast.get(),
         )
     }
 
     /// The size the pill rests at while it is not open.
     fn rest_size(&self) -> (f32, f32) {
+        let (timer, media, shelf) = (self.timer.borrow().active(), self.track.borrow().is_some(), self.shelf.borrow().len() > 0);
         match self.capsule() {
             Capsule::TimesUp => (TIMES_UP_W, PEEK_H),
-            Capsule::Hover => (if self.shelf.borrow().len() > 0 { HOVER_SHELF_W } else { HOVER_W }, PEEK_H),
+            Capsule::Hover => (hover_w(timer, shelf, media), PEEK_H),
             Capsule::Drop => (DROP_W, PEEK_H),
             Capsule::Added => (ADDED_W, PEEK_H),
-            Capsule::None => (COLLAPSED_W, COLLAPSED_H),
+            Capsule::Track => (TRACK_W, PEEK_H),
+            Capsule::None => (rest_w(timer, media, shelf), COLLAPSED_H),
         }
     }
 
@@ -702,7 +728,7 @@ impl App {
     /// The cursor has rested on the collapsed pill: with a timer running it widens into the hover
     /// capsule instead of opening the panel.
     fn on_dwell(&self) {
-        if self.timer.borrow().active() {
+        if self.timer.borrow().active() || self.track.borrow().is_some() {
             self.hover_peek.set(true);
             self.peek_clear();
             self.to_rest();
@@ -793,6 +819,112 @@ impl App {
             Hit::TimerPause => self.timer_pause_toggle(),
             Hit::TimerPlus => self.timer_add(60),
             Hit::TimerAdd5 => self.timer_add(300),
+            _ => {}
+        }
+    }
+
+    // ----------------------------------------------------------------- media
+
+    /// `WM_APP_MEDIA`: the worker has a new snapshot of what plays. A different track while the pill
+    /// is closed gets the "now playing" banner.
+    fn on_media(&self) {
+        if let Some(art) = media::take_art() {
+            if let Some(r) = self.renderer.borrow_mut().as_mut() {
+                r.set_media_art(art);
+            }
+        }
+        let next = media::track();
+        let fresh = next.as_ref().is_some_and(|n| n.playing && media::is_new_track(self.track.borrow().as_ref(), n));
+        crate::log(&format!(
+            "media: {:?} fresh={fresh}",
+            next.as_ref().map(|t| (&t.title, &t.artist, &t.source, t.playing, t.len))
+        ));
+        *self.track.borrow_mut() = next;
+        let seen = self.media_seen.replace(true);
+        if self.track.borrow().is_none() {
+            self.track_toast_clear();
+        } else if fresh && seen {
+            self.show_track_banner();
+        }
+        self.sync_viz();
+        self.media_clock();
+        self.settle_capsule(); // the resting pill gains or loses its media chip
+        self.invalidate();
+    }
+
+    /// The banner is for the closed pill, when nothing is in the way of it.
+    fn show_track_banner(&self) {
+        if self.open.get() || self.is_hidden() || self.peek.borrow().is_some() {
+            return;
+        }
+        self.track_toast.set(true);
+        unsafe {
+            SetTimer(Some(self.hwnd), T_TRACK, 3600, None);
+        }
+    }
+
+    fn track_toast_clear(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), T_TRACK);
+        }
+        if self.track_toast.replace(false) {
+            self.settle_capsule();
+            self.invalidate();
+        }
+    }
+
+    /// Listens for the visualizer only while there is something to draw: music is playing, the
+    /// setting is on, and the bars can be seen (the closed pill, or the Media tab). Otherwise nothing
+    /// is sampled and no thread runs.
+    fn sync_viz(&self) {
+        let want = self.cfg().visualizer
+            && self.track.borrow().as_ref().is_some_and(|t| t.playing)
+            && !self.is_hidden()
+            && (!self.open.get() || self.tab.get() == Tab::Media);
+        viz::set_big(self.open.get());
+        let mut listener = self.viz.borrow_mut();
+        if want && listener.is_none() {
+            *listener = Some(Listener::start(self.hwnd, WM_APP_VIZ));
+        } else if !want && listener.is_some() {
+            *listener = None;
+        }
+    }
+
+    /// The Media tab's time labels need a tick each second while it is open and playing (the bars
+    /// redraw them when they run, but not in silence or with the visualizer off).
+    fn media_clock(&self) {
+        let wanted = self.open.get() && self.tab.get() == Tab::Media && self.track.borrow().as_ref().is_some_and(|t| t.playing);
+        unsafe {
+            if wanted {
+                SetTimer(Some(self.hwnd), T_MEDIA, 1000, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), T_MEDIA);
+            }
+        }
+    }
+
+    /// A click on a media control (on the Media tab, or on the hover capsule's play button).
+    fn on_media_click(&self, hit: Hit, x: f32) {
+        match hit {
+            Hit::MediaPlay | Hit::PeekPlay => self.media.send(Cmd::Toggle),
+            Hit::MediaPrev => self.media.send(Cmd::Prev),
+            Hit::MediaNext => self.media.send(Cmd::Next),
+            Hit::MediaSeek => {
+                if let Some(t) = self.track.borrow_mut().as_mut().filter(|t| t.len > 0.0) {
+                    let to = media_view::seek_frac(x) as f64 * t.len;
+                    self.media.send(Cmd::Seek(to));
+                    // the bar moves now; Windows confirms the new position a moment later
+                    (t.pos, t.at) = (to, Instant::now());
+                }
+                self.invalidate();
+            }
+            Hit::MediaStyle => {
+                let on = !self.cfg().visualizer;
+                self.settings.borrow_mut().visualizer = on;
+                self.save_settings();
+                self.sync_viz();
+                self.invalidate();
+            }
             _ => {}
         }
     }
@@ -1053,6 +1185,13 @@ impl App {
             });
             let timer = self.timer.borrow();
             let shelf = self.shelf.borrow();
+            let track = self.track.borrow();
+            let media = track.as_ref().map(|t| MediaView {
+                track: t,
+                // flat unless the listener runs: paused, hidden or switched off draws no movement
+                levels: if self.viz.borrow().is_some() { viz::levels() } else { [0.0; viz::BANDS] },
+                bars_on: self.cfg().visualizer,
+            });
             let (timer_input, timer_label) = (self.timer_input.borrow(), self.timer_label.borrow());
             let (tnow, parsed) = (Instant::now(), timer::parse(&timer_input));
             let ends = shell::clock_after(if timer.phase() == Phase::Idle { parsed.unwrap_or(0) } else { timer.left_secs(tnow) });
@@ -1090,6 +1229,7 @@ impl App {
                     peek_slot: self.peek_slot.get(),
                 },
                 shelf: ShelfView { items: shelf.items(), drag_over: self.drag_over.get(), toast: self.shelf_toast.get() },
+                media,
             };
             match ui::pill::draw(r, &view) {
                 Ok(()) => false,
@@ -1124,6 +1264,7 @@ impl App {
         ) {
             r.set_look(pal, scale);
             *self.renderer.borrow_mut() = Some(r);
+            self.media.send(Cmd::ResendArt); // the new device has not got the cover
             self.invalidate();
         }
     }
@@ -1203,12 +1344,15 @@ impl App {
         self.peek_clear(); // the springs carry on from wherever the capsule was
         self.hover_peek.set(false);
         self.shelf_toast_clear();
+        self.track_toast_clear();
         if self.tab.get() == Tab::Shelf {
             self.shelf_refresh();
         }
         self.open.set(true);
         self.relayout_tabs(true); // show the active note's tab even if the row is scrolled elsewhere
         self.set_targets(EXPANDED_W, EXPANDED_H);
+        self.sync_viz();
+        self.media_clock();
     }
 
     /// Opens (or keeps open) until explicitly dismissed, and takes keyboard focus.
@@ -1286,6 +1430,8 @@ impl App {
             self.invalidate_list();
             self.hover_peek.set(false);
             self.to_rest(); // the plain pill, or the "Time's up" capsule if the time ran out
+            self.sync_viz();
+            self.media_clock();
 
             if ours {
                 let prev = self.prev_fg.get();
@@ -1324,6 +1470,8 @@ impl App {
         } else {
             self.notes.hide();
         }
+        self.sync_viz();
+        self.media_clock();
         self.invalidate();
     }
 
@@ -1408,6 +1556,8 @@ impl App {
                 timer: self.timer.borrow().phase(),
                 capsule: self.capsule(),
                 shelf_n: self.shelf.borrow().len(),
+                media: self.track.borrow().is_some(),
+                seekable: self.track.borrow().as_ref().is_some_and(|t| t.seekable),
             },
         )
     }
@@ -1509,11 +1659,14 @@ impl App {
                 // the time's-up capsule opens the Timer tab; the plain pill and the hover capsule, the panel
                 Hit::Pill if self.capsule() == Capsule::TimesUp => self.open_sticky(Some(Tab::Timer)),
                 Hit::Pill if self.capsule() == Capsule::Added => self.open_sticky(Some(Tab::Shelf)),
+                Hit::Pill if self.capsule() == Capsule::Track => self.open_sticky(Some(Tab::Media)),
                 Hit::Pill => self.open_sticky(None),
                 Hit::PeekNotes => self.open_sticky(Some(Tab::Notes)),
                 Hit::PeekClip => self.open_sticky(Some(Tab::Clipboard)),
                 Hit::PeekShelf => self.open_sticky(Some(Tab::Shelf)),
                 Hit::PeekTime => self.open_sticky(Some(Tab::Timer)),
+                Hit::PeekArt => self.open_sticky(Some(Tab::Media)),
+                Hit::PeekPlay => self.on_media_click(Hit::PeekPlay, x),
                 Hit::PeekRing => self.timer_pause_toggle(),
                 h @ (Hit::TimerDone | Hit::TimerAdd5) => self.on_timer_click(h),
                 _ => {}
@@ -1525,6 +1678,8 @@ impl App {
             Hit::TabClip => self.set_tab(Tab::Clipboard),
             Hit::TabTimer => self.set_tab(Tab::Timer),
             Hit::TabShelf => self.set_tab(Tab::Shelf),
+            Hit::TabMedia => self.set_tab(Tab::Media),
+            h @ (Hit::MediaPlay | Hit::MediaPrev | Hit::MediaNext | Hit::MediaSeek | Hit::MediaStyle) => self.on_media_click(h, x),
             h @ (Hit::ShelfTile(_) | Hit::ShelfSlot | Hit::ShelfClear) => self.on_shelf_click(h, x, y),
             h @ (Hit::TimerField
             | Hit::TimerLabel
@@ -2058,6 +2213,11 @@ impl App {
             T_PEEK => self.peek_hold_over(),
             T_TIMER => self.timer_tick(),
             T_SHELF => self.shelf_toast_clear(),
+            T_TRACK => self.track_toast_clear(),
+            T_MEDIA => {
+                self.media_clock();
+                self.invalidate();
+            }
             T_FS => self.update_fullscreen(),
             T_PASTE => {
                 crate::log(&format!("send Ctrl+V; foreground={:?}", unsafe { GetForegroundWindow() }));
@@ -2106,6 +2266,7 @@ impl App {
             self.to_rest(); // a time's-up capsule that came due while hidden is waiting
             self.invalidate();
         }
+        self.sync_viz(); // nothing listens while the pill is out of sight
         crate::log(&format!(
             "visibility: user_hidden={} fullscreen_hidden={} window_visible={}",
             self.user_hidden.get(),
@@ -2380,6 +2541,15 @@ impl App {
                 }
                 WM_APP_THUMB => {
                     self.on_thumbs();
+                    LRESULT(0)
+                }
+                WM_APP_MEDIA => {
+                    self.on_media();
+                    LRESULT(0)
+                }
+                WM_APP_VIZ => {
+                    viz::redraw_handled();
+                    self.invalidate();
                     LRESULT(0)
                 }
                 WM_COMMAND => {
