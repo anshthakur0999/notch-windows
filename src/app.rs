@@ -114,6 +114,8 @@ pub struct App {
     pub sticky: Cell<bool>,
     /// The header pin: never auto-close (mouse leave, focus loss) until unpinned or collapsed.
     keep_open: Cell<bool>,
+    /// The shelf's file picker is up: the panel must not close under it.
+    picking: Cell<bool>,
     /// Hidden because a full-screen app or game is in front.
     fs_hidden: Cell<bool>,
     /// Hidden on request (`notch.exe hide`, the visibility hotkey, the tray menu).
@@ -217,6 +219,7 @@ impl App {
             open: Cell::new(false),
             sticky: Cell::new(false),
             keep_open: Cell::new(false),
+            picking: Cell::new(false),
             fs_hidden: Cell::new(false),
             user_hidden: Cell::new(false),
             paused: Cell::new(false),
@@ -323,7 +326,7 @@ impl App {
 
     /// The pill may close by itself (mouse leaves / focus is lost).
     fn auto_close_ok(&self) -> bool {
-        !self.sticky.get() && !self.keep_open.get()
+        !self.sticky.get() && !self.keep_open.get() && !self.picking.get()
     }
 
     // ----------------------------------------------------- list / tab caches
@@ -527,8 +530,12 @@ impl App {
                 match peek.as_ref() {
                     // the capsule has finished widening and is being held: keep its thumbnail
                     Some(p) if p.growing() => return,
-                    // it has shrunk back to the resting pill
-                    Some(_) => *peek = None,
+                    // it has shrunk back to the resting pill; the last frame was drawn with the peek
+                    // up (no shelf count or timer on it), so repaint now it is gone
+                    Some(_) => {
+                        *peek = None;
+                        self.invalidate();
+                    }
                     None => {}
                 }
             }
@@ -906,25 +913,52 @@ impl App {
         }
     }
 
-    /// A click on a tile (ticks it, or removes a missing one by its x) or on "Clear".
+    /// Shows the file picker. The panel stays open meanwhile (the dialog takes the focus and the
+    /// pointer leaves the pill, either of which would close it), then goes back to its usual rules.
+    fn pick_files(&self) -> Vec<String> {
+        self.picking.set(true);
+        let files = crate::dnd::pick_files(self.hwnd);
+        self.picking.set(false);
+        if self.open.get() {
+            if self.sticky.get() {
+                // the pill is no-activate, so it does not get the foreground back by itself: without
+                // it Esc and a click on another app would stop closing the panel
+                self.activate_pill();
+                if unsafe { GetForegroundWindow() } != self.hwnd {
+                    self.sticky.set(false);
+                    self.arm_collapse();
+                }
+            } else if self.auto_close_ok() && !self.cursor_in_pill() {
+                self.arm_collapse();
+            }
+        }
+        files
+    }
+
+    /// A click on a tile (its x removes it, anywhere else ticks it unless it is missing), on "Clear"
+    /// or on the "+" slot.
     fn on_shelf_click(&self, hit: Hit, x: f32, y: f32) {
         match hit {
             Hit::ShelfTile(i) => {
                 let (bx, by) = shelf_view::badge(shelf_view::tile(i, self.scroll.get()));
                 let mut shelf = self.shelf.borrow_mut();
-                if shelf.items().get(i).is_some_and(|it| it.missing) {
-                    if (x - bx).hypot(y - by) <= 13.0 {
-                        shelf.remove(i);
-                        drop(shelf);
-                        self.save_shelf();
-                    }
-                } else {
+                if (x - bx).hypot(y - by) <= 13.0 {
+                    shelf.remove(i);
+                    drop(shelf);
+                    self.save_shelf();
+                } else if !shelf.items().get(i).is_some_and(|it| it.missing) {
                     shelf.toggle(i);
                 }
             }
             Hit::ShelfClear => {
                 self.shelf.borrow_mut().clear();
                 self.save_shelf();
+            }
+            Hit::ShelfSlot => {
+                let files = self.pick_files();
+                if !files.is_empty() {
+                    self.on_drop(files);
+                }
             }
             _ => return,
         }
@@ -933,14 +967,14 @@ impl App {
         self.invalidate();
     }
 
-    /// The button went down: on a tile (or "Drag all") that may be the start of a drag out.
+    /// The button went down: on a tile that may be the start of a drag out.
     fn on_press(&self, px: i32, py: i32) {
         self.press.set(None);
         if !self.expanded() {
             return;
         }
         let hit = self.hit_at(self.to_dip(px), self.to_dip(py));
-        if matches!(hit, Hit::ShelfTile(_) | Hit::ShelfDragAll) {
+        if matches!(hit, Hit::ShelfTile(_)) {
             self.press.set(Some((hit, px, py)));
         }
     }
@@ -963,7 +997,6 @@ impl App {
             let shelf = self.shelf.borrow();
             match hit {
                 Hit::ShelfTile(i) => shelf.drag_set(i),
-                Hit::ShelfDragAll => shelf.all_present(),
                 _ => Vec::new(),
             }
         };
@@ -1327,7 +1360,7 @@ impl App {
     }
 
     fn focus_check(&self) {
-        if !self.open.get() || !self.sticky.get() || self.keep_open.get() {
+        if !self.open.get() || !self.sticky.get() || self.keep_open.get() || self.picking.get() {
             return;
         }
         let fg = unsafe { GetForegroundWindow() };
@@ -1492,7 +1525,7 @@ impl App {
             Hit::TabClip => self.set_tab(Tab::Clipboard),
             Hit::TabTimer => self.set_tab(Tab::Timer),
             Hit::TabShelf => self.set_tab(Tab::Shelf),
-            h @ (Hit::ShelfTile(_) | Hit::ShelfClear | Hit::ShelfDragAll) => self.on_shelf_click(h, x, y),
+            h @ (Hit::ShelfTile(_) | Hit::ShelfSlot | Hit::ShelfClear) => self.on_shelf_click(h, x, y),
             h @ (Hit::TimerField
             | Hit::TimerLabel
             | Hit::TimerPreset(_)

@@ -136,11 +136,11 @@ pub enum Hit {
     PeekClip,
     PeekRing,
     PeekTime,
-    /// The shelf: its tab, a tile (by position), the "Drag all" handle and "Clear", and the shelf
-    /// button of the hover capsule.
+    /// The shelf: its tab, a tile (by position), "Clear", the "+" slot after the last tile (opens
+    /// a file picker) and the shelf button of the hover capsule.
     TabShelf,
     ShelfTile(usize),
-    ShelfDragAll,
+    ShelfSlot,
     ShelfClear,
     PeekShelf,
 }

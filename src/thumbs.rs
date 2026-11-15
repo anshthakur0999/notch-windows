@@ -15,9 +15,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::HSTRING;
 
-/// Big enough to fill a tile (118 x 80 DIP) at 200% scale.
-const THUMB: i32 = 256;
-const ICON: i32 = 96;
+/// Big enough to cover a tile (118 x 80 DIP) at 300% scale even for a portrait picture: the tile
+/// crops to fill, so the shorter side has to reach the tile's width.
+const THUMB: i32 = 512;
+/// Drawn 56 DIP across, so this is enough up to 200% scale.
+const ICON: i32 = 128;
 
 /// One finished preview: premultiplied BGRA pixels, top row first.
 pub struct Thumb {

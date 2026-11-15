@@ -83,12 +83,13 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     // The collapsed indicator (a faint dash) gives way to the peek's badge.
     // (and it only comes back once the text has gone too, so it never shows through "Copied")
     let dash_gone = peek.map_or(0.0, |p| (p.look.icon + p.look.old_icon).max(p.look.label).max(p.look.line).min(1.0));
-    // a running timer or files on the shelf take the dash's place on the resting pill; the capsules cover it
-    let chips = (v.timer.active() || !v.shelf.items.is_empty()) && peek.is_none() && v.timer.capsule == Capsule::None;
+    // a running timer or files on the shelf take the dash's place on the resting pill; the capsules cover it.
+    // They come back with the dash, as the peek's text goes, not only once the peek is gone.
+    let chips = (v.timer.active() || !v.shelf.items.is_empty()) && v.timer.capsule == Capsule::None;
     let dash = if chips || v.timer.capsule != Capsule::None { 0.0 } else { 1.0 - dash_gone };
     draw_body(r, pill, rad, t, body_a, dash);
     if chips {
-        shelf_view::draw_resting(r, v, pill, (1.0 - t * 4.0).clamp(0.0, 1.0));
+        shelf_view::draw_resting(r, v, pill, (1.0 - t * 4.0).clamp(0.0, 1.0) * (1.0 - dash_gone));
     }
 
     if let Some(p) = peek {

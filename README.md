@@ -138,15 +138,18 @@ A parking spot for files while you work: drop them on the pill now, drag them ou
 
 * **Drop** files or folders on the pill from Explorer, the desktop or any app. While you drag, the
   pill widens into a drop zone and glows when you are over it; on release a small **Added** toast
-  says how many. Dropping on the open panel works too. It holds up to 48 files (the oldest go first).
+  says how many. Dropping on the open panel works too, and so does the **+** slot after the last
+  tile, which opens a file picker (files only; drop a folder to add it). It holds up to 48 files
+  (the oldest go first).
 * The shelf holds **links, not copies**: nothing is duplicated and nothing is moved. If a file is
-  moved or deleted, its tile says **Missing** and the x removes it. UNC (network) paths are not
-  checked, so they are never marked missing.
+  moved or deleted, its tile says **Missing**. UNC (network) paths are not checked, so they are
+  never marked missing. Hover a tile and click its **x** to take that one file off the shelf
+  (**Clear** empties it, **Del** removes the ticked ones).
 * The resting pill shows a tray and the file count (beside the timer when one runs); hovering shows a
   shelf button with the count.
 * **Drag out**: press a tile and drag. Ticked tiles go together (click a tile to tick it); a tile
-  that is not ticked goes alone; **Drag all** takes every file still there. The drop is always a
-  copy, so the originals stay where they are. `Esc` cancels a drag.
+  that is not ticked goes alone. The drop is always a copy, so the originals stay where they are.
+  `Esc` cancels a drag.
 * `Del` removes the ticked tiles from the shelf (never from disk); **Clear** empties it.
 * Files leave the shelf after **24 hours**: set `"shelf_hours"` (0 = keep until removed).
 * Each tile shows the same preview Explorer does: a thumbnail for images, PDFs, videos and the like,
