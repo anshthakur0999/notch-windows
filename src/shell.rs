@@ -162,6 +162,19 @@ pub fn reduced_motion() -> bool {
 
 /// A Windows notification through the tray icon (a toast on Windows 10/11). The timer uses it
 /// when its time is up while the pill is hidden.
+/// Starts (`true`) or stops the looping alarm. It is Windows' own alarm sound (Alarm01 unless changed
+/// in the Sound settings), and silent when that is set to None.
+pub fn alarm(on: bool) {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_LOOP, SND_NODEFAULT};
+    unsafe {
+        let _ = if on {
+            PlaySoundW(w!("Notification.Looping.Alarm"), None, SND_ALIAS | SND_ASYNC | SND_LOOP | SND_NODEFAULT)
+        } else {
+            PlaySoundW(PCWSTR::null(), None, Default::default()) // only stops sounds this process plays
+        };
+    }
+}
+
 pub fn notify(hwnd: HWND, title: &str, text: &str) {
     let mut nid = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,

@@ -870,6 +870,9 @@ impl App {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), T_TIMER);
         }
+        if self.timer.borrow().phase() != Phase::Finished {
+            shell::alarm(false);
+        }
         if let Some(wait) = self.timer.borrow().next_tick(Instant::now()) {
             unsafe {
                 SetTimer(Some(self.hwnd), T_TIMER, wait.as_millis() as u32, None);
@@ -894,6 +897,7 @@ impl App {
         }
         self.peek_clear(); // an alarm outranks a copy toast
         self.settle_capsule();
+        shell::alarm(true); // rings until Done, +5 min or Stop (timer_changed stops it)
     }
 
     fn start_timer(&self) {
