@@ -49,8 +49,9 @@ pub fn seek_frac(x: f32) -> f32 {
     ((x - (s.l + KNOB_R)) / (s.w() - 2.0 * KNOB_R)).clamp(0.0, 1.0)
 }
 
-/// Hit-test inside the Media tab. With nothing playing there are no controls.
-pub fn hit(x: f32, y: f32, has_track: bool, seekable: bool) -> Option<Hit> {
+/// Hit-test inside the Media tab. With nothing playing there are no controls, and a skip the
+/// player does not offer cannot be pressed.
+pub fn hit(x: f32, y: f32, has_track: bool, seekable: bool, can_prev: bool, can_next: bool) -> Option<Hit> {
     if !has_track {
         return None;
     }
@@ -58,9 +59,9 @@ pub fn hit(x: f32, y: f32, has_track: bool, seekable: bool) -> Option<Hit> {
     if near(play_c(), PLAY_R) {
         Some(Hit::MediaPlay)
     } else if near(prev_c(), SKIP_R) {
-        Some(Hit::MediaPrev)
+        can_prev.then_some(Hit::MediaPrev)
     } else if near(next_c(), SKIP_R) {
-        Some(Hit::MediaNext)
+        can_next.then_some(Hit::MediaNext)
     } else if bars_btn().contains(x, y) {
         Some(Hit::MediaStyle)
     } else if seekable && seek_bar().contains(x, y) {
@@ -256,7 +257,7 @@ fn draw_track(r: &Renderer, v: &View, m: &MediaView, alpha: f32) {
     // where it is in the track
     let s = seek_bar();
     let (l, rr, cy) = (s.l + KNOB_R, s.r - KNOB_R, s.cy());
-    let pos = t.position();
+    let pos = m.scrub.map_or_else(|| t.position(), |f| f as f64 * t.len);
     let times = RectF { t: s.b + 2.0, b: s.b + 22.0, ..s };
     r.text(&mmss(pos), F::Hint, times.d2d(), color(pal.muted, alpha));
     // the line is always there: a player (Zen) names a new track seconds before it gives the length
@@ -265,19 +266,20 @@ fn draw_track(r: &Renderer, v: &View, m: &MediaView, alpha: f32) {
         let f = (pos / t.len).clamp(0.0, 1.0) as f32;
         let knob = l + (rr - l) * f;
         r.fill_rrect(RectF { l, t: cy - 2.0, r: knob, b: cy + 2.0 }.d2d(), 2.0, color(pal.media, alpha));
-        r.fill_circle(knob, cy, if hov(Hit::MediaSeek) { KNOB_R + 1.0 } else { KNOB_R }, color(pal.text, alpha));
+        let big = hov(Hit::MediaSeek) || m.scrub.is_some();
+        r.fill_circle(knob, cy, if big { KNOB_R + 1.0 } else { KNOB_R }, color(pal.text, alpha));
         let left = format!("-{}", mmss(t.len - pos));
         let lw = r.measure(F::Hint, &left);
         r.text(&left, F::Hint, RectF { l: s.r - lw - 2.0, ..times }.d2d(), color(pal.muted, alpha));
     }
 
     // the buttons
-    for (c, radius, hit, glyph, size) in [
-        (prev_c(), SKIP_R, Hit::MediaPrev, '\u{E892}', F::Icon16),
-        (next_c(), SKIP_R, Hit::MediaNext, '\u{E893}', F::Icon16),
+    for (c, radius, hit, glyph, size, on) in [
+        (prev_c(), SKIP_R, Hit::MediaPrev, '\u{E892}', F::Icon16, t.can_prev),
+        (next_c(), SKIP_R, Hit::MediaNext, '\u{E893}', F::Icon16, t.can_next),
     ] {
         r.fill_circle(c.0, c.1, radius, color(lit(r, pal.tile, hov(hit)), alpha));
-        r.glyph(glyph, size, c.0, c.1, color(pal.text, alpha));
+        r.glyph(glyph, size, c.0, c.1, color(if on { pal.text } else { pal.faint }, alpha));
     }
     let c = play_c();
     r.fill_circle(c.0, c.1, PLAY_R, color(lit(r, pal.media, hov(Hit::MediaPlay)), alpha));
@@ -300,16 +302,27 @@ mod tests {
 
     #[test]
     fn every_control_is_under_its_point_and_the_empty_tab_has_none() {
-        let c = |p: (f32, f32)| p;
-        assert_eq!(hit(c(play_c()).0, c(play_c()).1, true, true), Some(Hit::MediaPlay));
-        assert_eq!(hit(prev_c().0, prev_c().1, true, true), Some(Hit::MediaPrev));
-        assert_eq!(hit(next_c().0, next_c().1, true, true), Some(Hit::MediaNext));
-        assert_eq!(hit(bars_btn().cx(), bars_btn().cy(), true, true), Some(Hit::MediaStyle));
-        assert_eq!(hit(seek_bar().cx(), seek_bar().cy(), true, true), Some(Hit::MediaSeek));
-        assert_eq!(hit(seek_bar().cx(), seek_bar().cy(), true, false), None, "a player that cannot seek has no bar");
-        assert_eq!(hit(play_c().0, play_c().1, false, false), None, "nothing playing: nothing to press");
+        let all = |p: (f32, f32)| hit(p.0, p.1, true, true, true, true);
+        assert_eq!(all(play_c()), Some(Hit::MediaPlay));
+        assert_eq!(all(prev_c()), Some(Hit::MediaPrev));
+        assert_eq!(all(next_c()), Some(Hit::MediaNext));
+        assert_eq!(all((bars_btn().cx(), bars_btn().cy())), Some(Hit::MediaStyle));
+        assert_eq!(all((seek_bar().cx(), seek_bar().cy())), Some(Hit::MediaSeek));
+        assert_eq!(hit(seek_bar().cx(), seek_bar().cy(), true, false, true, true), None, "a player that cannot seek has no bar");
+        assert_eq!(hit(play_c().0, play_c().1, false, false, false, false), None, "nothing playing: nothing to press");
         // the round buttons are round: a corner of the box around one is not a hit
-        assert_eq!(hit(play_c().0 + PLAY_R * 0.9, play_c().1 + PLAY_R * 0.9, true, true), None);
+        assert_eq!(all((play_c().0 + PLAY_R * 0.9, play_c().1 + PLAY_R * 0.9)), None);
+    }
+
+    #[test]
+    fn a_skip_the_player_does_not_offer_cannot_be_pressed() {
+        // a single browser video: Chrome says there is no next or previous, but still answers "done"
+        let (p, n, q) = (prev_c(), next_c(), play_c());
+        assert_eq!(hit(p.0, p.1, true, true, false, false), None);
+        assert_eq!(hit(n.0, n.1, true, true, false, false), None);
+        assert_eq!(hit(q.0, q.1, true, true, false, false), Some(Hit::MediaPlay), "play still works");
+        assert_eq!(hit(p.0, p.1, true, true, true, false), Some(Hit::MediaPrev), "each way on its own");
+        assert_eq!(hit(n.0, n.1, true, true, true, false), None);
     }
 
     #[test]

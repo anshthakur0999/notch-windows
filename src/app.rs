@@ -269,6 +269,8 @@ pub struct App {
     dragging_out: Cell<bool>,
     shelf_toast: Cell<Option<(usize, usize)>>,
     press: Cell<Option<(Hit, i32, i32)>>,
+    /// The seek bar is being dragged: how far along the pointer is (0..1). It seeks on release.
+    scrub: Cell<Option<f32>>,
     /// Live media: the worker that follows Windows' media session, what it last reported, the
     /// "now playing" banner, whether a snapshot has been seen yet (what already played at launch
     /// gets no banner), and the visualizer's listener (only while it has something to draw).
@@ -374,6 +376,7 @@ impl App {
             dragging_out: Cell::new(false),
             shelf_toast: Cell::new(None),
             press: Cell::new(None),
+            scrub: Cell::new(None),
             media: Media::start(hwnd, WM_APP_MEDIA),
             track: RefCell::new(None),
             track_toast: Cell::new(false),
@@ -1573,6 +1576,26 @@ impl App {
         if matches!(hit, Hit::ShelfTile(_)) {
             self.press.set(Some((hit, px, py)));
         }
+        if hit == Hit::MediaSeek {
+            // captured, so the drag keeps going past the bar's ends and the pill stays open
+            self.scrub.set(Some(media_view::seek_frac(self.to_dip(px))));
+            unsafe {
+                SetCapture(self.hwnd);
+            }
+            self.invalidate();
+        }
+    }
+
+    /// The button came up after dragging the seek bar: seek to where it was let go.
+    fn end_scrub(&self, px: i32) {
+        self.scrub.set(None); // before ReleaseCapture, whose WM_CAPTURECHANGED would cancel it
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        self.on_media_click(Hit::MediaSeek, self.to_dip(px));
+        if !self.cursor_in_pill() {
+            self.on_mouse_leave(); // let go outside: no move will arrive to say so
+        }
     }
 
     /// The pointer moved with the button held: far enough from where it went down and it is a drag.
@@ -1655,6 +1678,7 @@ impl App {
                 // flat unless the listener runs: paused, hidden or switched off draws no movement
                 levels: if self.viz.borrow().is_some() { viz::levels() } else { [0.0; viz::BANDS] },
                 bars_on: self.cfg().visualizer,
+                scrub: self.scrub.get(),
             });
             let (devs, outputs, devcard) = (self.devs.borrow(), self.outputs.borrow(), self.devcard.borrow());
             let (avail, pairs, rows) = (self.avail.borrow(), self.pairs.borrow(), self.tab_rows());
@@ -2052,6 +2076,8 @@ impl App {
                 shelf_n: self.shelf.borrow().len(),
                 media: self.track.borrow().is_some(),
                 seekable: self.track.borrow().as_ref().is_some_and(|t| t.seekable),
+                can_prev: self.track.borrow().as_ref().is_some_and(|t| t.can_prev),
+                can_next: self.track.borrow().as_ref().is_some_and(|t| t.can_next),
                 dev: rows.shape(),
                 card_buttons: self.devcard.borrow().as_ref().is_some_and(|c| c.card.has_buttons() && !c.sparking),
             },
@@ -2071,6 +2097,10 @@ impl App {
             ));
         }
         self.mouse.set((x, y));
+        if self.scrub.get().is_some() {
+            self.scrub.set(Some(media_view::seek_frac(x)));
+            self.invalidate();
+        }
         if !self.tracking.get() {
             let mut t = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -2122,6 +2152,9 @@ impl App {
 
     fn on_mouse_leave(&self) {
         self.tracking.set(false);
+        if self.scrub.get().is_some() {
+            return; // dragging the seek bar past the pill's edge; end_scrub checks on release
+        }
         self.hover_lock.set(false);
         self.dwell_pending.set(false);
         unsafe {
@@ -2987,7 +3020,18 @@ impl App {
                 WM_LBUTTONUP => {
                     let (x, y) = window::mouse_xy(lp);
                     self.press.set(None);
-                    self.on_click(x, y, key_down(VK_SHIFT));
+                    if self.scrub.get().is_some() {
+                        self.end_scrub(x);
+                    } else {
+                        self.on_click(x, y, key_down(VK_SHIFT));
+                    }
+                    LRESULT(0)
+                }
+                WM_CAPTURECHANGED => {
+                    // capture taken away mid-drag (Alt+Tab, a menu): drop the drag without seeking
+                    if self.scrub.take().is_some() {
+                        self.invalidate();
+                    }
                     LRESULT(0)
                 }
                 WM_LBUTTONDBLCLK => {
