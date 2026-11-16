@@ -10,7 +10,7 @@ A tiny floating pill at the top-centre of your screen (think Dynamic Island) tha
 tools: a **notepad**, a **clipboard history**, a **timer**, a **file shelf**, a **now-playing
 readout with a visualizer** and a **Bluetooth device hub**. Hover it and it opens, move away and it
 closes. Written in Rust against
-raw Win32 + DirectComposition/Direct2D, and built to cost almost nothing while idle: one 960 KB exe,
+raw Win32 + DirectComposition/Direct2D, and built to cost almost nothing while idle: one 966 KB exe,
 no installer, no background polling.
 
 * **Notepad**: several auto-saved notes as tabs.
@@ -394,7 +394,7 @@ Measured on this branch (Windows 11, software rasteriser): 0.0 ms of CPU over 15
 playing, and 0.0 ms with music playing and **Bars** off; with music playing and the bars on, about
 2 to 3% of one core on the closed pill and 15 to 20% while the Media tab is open (a test track that
 never sits still; with `use_gpu` on, about 2% and 9%). About 14 MB private working set idle and 19 MB while a cover is held (before the Devices watchers
-above, which add about 3 MB private), a 960 KB executable.
+above, which add about 3 MB private), a 966 KB executable.
 
 ## Build from source
 
