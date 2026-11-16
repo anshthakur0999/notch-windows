@@ -462,6 +462,8 @@ pub struct View<'a> {
     pub w: f32,
     pub h: f32,
     pub tab: Tab,
+    /// 0 to 1 as the tab's content fades in after a switch; 1 at rest.
+    pub tab_fade: f32,
     pub hover: Hit,
     /// Highlighted clipboard row (the one under the pointer), by list position.
     pub sel: Option<usize>,

@@ -64,6 +64,8 @@ pub const WM_APP_VIZ: u32 = WM_APP + 8;
 pub const WM_APP_DEVICES: u32 = WM_APP + 9;
 
 // All timers are one-shot: nothing ticks while the pill is idle.
+/// How long a tab's content takes to fade in after switching.
+const TAB_FADE: f32 = 0.22;
 const T_DWELL: usize = 1;
 const T_COLLAPSE: usize = 2;
 const T_SAVE: usize = 3;
@@ -224,6 +226,8 @@ pub struct App {
     w: Cell<Spring>,
     h: Cell<Spring>,
     animating: Cell<bool>,
+    /// When the tab last changed, while its content is still fading in.
+    tab_at: Cell<Option<Instant>>,
     last_frame: Cell<Instant>,
 
     tracking: Cell<bool>,
@@ -350,6 +354,7 @@ impl App {
             w: Cell::new(Spring::new(COLLAPSED_W)),
             h: Cell::new(Spring::new(COLLAPSED_H)),
             animating: Cell::new(false),
+            tab_at: Cell::new(None),
             last_frame: Cell::new(Instant::now()),
             tracking: Cell::new(false),
             dwell_pending: Cell::new(false),
@@ -602,7 +607,8 @@ impl App {
         w.step_with(dt, freq, zeta);
         h.step_with(dt, freq, zeta);
         // a fade the springs do not drive (the peek's text going out) also keeps the loop alive
-        let done = w.settled() && h.settled() && !self.peek.borrow().as_ref().is_some_and(|p| p.busy(now));
+        let fading = self.tab_at.get().is_some_and(|at| now.duration_since(at).as_secs_f32() < TAB_FADE);
+        let done = w.settled() && h.settled() && !fading && !self.peek.borrow().as_ref().is_some_and(|p| p.busy(now));
         if done {
             w.snap();
             h.snap();
@@ -1581,6 +1587,10 @@ impl App {
         if matches!(hit, Hit::ShelfTile(_)) {
             self.press.set(Some((hit, px, py)));
         }
+        // tabs switch on press, so the pill answers the finger going down; the release then finds the tab already on
+        if matches!(hit, Hit::TabNotes | Hit::TabClip | Hit::TabTimer | Hit::TabShelf | Hit::TabMedia | Hit::TabDevices) {
+            self.on_click(px, py, false);
+        }
         if hit == Hit::MediaSeek {
             // captured, so the drag keeps going past the bar's ends and the pill stays open
             self.scrub.set(Some(media_view::seek_frac(self.to_dip(px))));
@@ -1695,6 +1705,7 @@ impl App {
                 w,
                 h,
                 tab: self.tab.get(),
+                tab_fade: self.tab_at.get().map_or(1.0, |at| (at.elapsed().as_secs_f32() / TAB_FADE).min(1.0)),
                 hover: self.hover.get(),
                 sel: self.sel.get(),
                 scroll: self.scroll.get(),
@@ -1972,6 +1983,10 @@ impl App {
             self.leave_devices();
         }
         self.tab.set(t);
+        if self.expanded() && !shell::reduced_motion() {
+            self.tab_at.set(Some(Instant::now()));
+            self.start_anim();
+        }
         self.scroll.set(0.0);
         self.hover.set(Hit::None);
         self.sel.set(None);

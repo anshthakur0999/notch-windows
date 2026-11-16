@@ -111,6 +111,8 @@ pub fn draw(r: &mut Renderer, v: &View) -> Result<()> {
     if alpha > 0.01 {
         r.push_clip(pill.d2d());
         draw_header(r, v, alpha);
+        // the header stays put; only the new tab's content fades in
+        let alpha = alpha * smoothstep(0.0, 1.0, v.tab_fade);
         match v.tab {
             Tab::Notes => notes_view::draw(r, v, alpha),
             Tab::Clipboard => clip_list::draw(r, v, alpha),
