@@ -564,6 +564,28 @@ fn is_desktop(class: &str) -> bool {
     matches!(class, "Progman" | "WorkerW")
 }
 
+/// Win+Shift+S covers the display with the Snipping Tool's overlay while you pick an area; that is
+/// no full-screen app, and hiding for it made the pill blink out around every screenshot.
+fn is_screenshot_overlay(exe: &str) -> bool {
+    let name = exe.rsplit('\\').next().unwrap_or(exe);
+    name.eq_ignore_ascii_case("SnippingTool.exe") || name.eq_ignore_ascii_case("ScreenClippingHost.exe")
+}
+
+/// The full path of the program that owns `hwnd`, or "" when Windows won't say.
+fn exe_of(hwnd: HWND) -> String {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(h);
+        if ok { String::from_utf16_lossy(&buf[..len as usize]) } else { String::new() }
+    }
+}
+
 fn foreground_fills_display(pill: HWND) -> bool {
     unsafe {
         let fg = GetForegroundWindow();
@@ -577,6 +599,7 @@ fn foreground_fills_display(pill: HWND) -> bool {
         GetWindowRect(fg, &mut win).is_ok()
             && GetMonitorInfoW(MonitorFromWindow(pill, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool()
             && covers(&win, &mi.rcMonitor)
+            && !is_screenshot_overlay(&exe_of(fg))
     }
 }
 
@@ -620,5 +643,14 @@ mod tests {
     fn the_desktop_is_not_a_full_screen_app() {
         assert!(is_desktop("Progman") && is_desktop("WorkerW"));
         assert!(!is_desktop("Chrome_WidgetWin_1") && !is_desktop(""));
+    }
+
+    #[test]
+    fn the_screenshot_overlay_is_not_a_full_screen_app() {
+        assert!(is_screenshot_overlay(r"C:\Program Files\WindowsApps\Microsoft.ScreenSketch_11.2510.31.0_x64__8wekyb3d8bbwe\SnippingTool\SnippingTool.exe"));
+        assert!(is_screenshot_overlay(r"C:\Windows\SystemApps\ScreenClippingHost.exe"));
+        assert!(is_screenshot_overlay("snippingtool.exe"), "any case");
+        assert!(!is_screenshot_overlay(r"C:\Games\game.exe") && !is_screenshot_overlay(""));
+        assert!(!is_screenshot_overlay(r"C:\Tools\NotSnippingTool.exe"), "the whole file name, not its end");
     }
 }
