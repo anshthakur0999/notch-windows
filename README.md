@@ -6,406 +6,205 @@
 
 [![Latest release](https://img.shields.io/github/v/release/anshthakur0999/notch-windows)](https://github.com/anshthakur0999/notch-windows/releases/latest)
 
-A tiny floating pill at the top-centre of your screen (think Dynamic Island) that holds six small
-tools: a **notepad**, a **clipboard history**, a **timer**, a **file shelf**, a **now-playing
-readout with a visualizer** and a **Bluetooth device hub**. Hover it and it opens, move away and it
-closes. Written in Rust against
-raw Win32 + DirectComposition/Direct2D, and built to cost almost nothing while idle: one 968 KB exe,
-no installer, no background polling.
+A small floating pill at the top of your screen, like a Dynamic Island for Windows. Hover it and it
+opens; move away and it closes. Inside are six tools:
 
-* **Notepad**: several auto-saved notes as tabs.
-* **Clipboard**: searchable history of text, links, code and images; click an entry to paste it.
-* **Timer**: type `25m`, it keeps counting on the collapsed pill and says so when time is up.
-* **Shelf**: park files on the pill while you work, drag them out into any app later.
-* **Media**: what is playing in any browser or music app, with its cover, play / pause, skip, seek
-  and a live visualizer, on the pill itself.
-* **Devices**: when earbuds, a mouse, a keyboard or a controller connects, the pill opens a card with
-  its battery percentage and, for earbuds, a one-click **Use for audio**; the tab lists every audio
-  output (click one to switch), the connected devices with **Disconnect**, the paired ones that are
-  not connected with **Connect**, and an **Add device** screen to pair new ones.
-* **Copy peek**: every time you copy, the pill widens to say **Copied** and shows what it was.
+* **Notepad**: quick notes as tabs, saved as you type.
+* **Clipboard**: a searchable history of what you copied; click an entry to paste it.
+* **Timer**: type `25m` and go; it rings when time is up.
+* **Shelf**: drop files on the pill now, drag them into any app later.
+* **Media**: what's playing in your browser or music app, with play / pause, skip and seek.
+* **Devices**: battery levels of your Bluetooth earbuds, mouse and controller, and one-click
+  audio switching.
+
+It is one small exe with no installer, and it uses next to no CPU while you're not touching it.
+
+<p align="center">
+  <img src="assets/screenshots/resting.png" width="220" alt="The closed pill showing a running timer at 24:51 and 3 files on the shelf">
+</p>
+
+| | | |
+| :---: | :---: | :---: |
+| <img src="assets/screenshots/notepad.png" width="260" alt="Notepad tab with three notes and a to-do list"> | <img src="assets/screenshots/clipboard.png" width="260" alt="Clipboard tab with a search box and four recent entries"> | <img src="assets/screenshots/timer.png" width="260" alt="Timer tab counting down from 25 minutes"> |
+| **Notepad** | **Clipboard** | **Timer** |
+| <img src="assets/screenshots/shelf.png" width="260" alt="Shelf tab holding three files"> | <img src="assets/screenshots/media.png" width="260" alt="Media tab with nothing playing"> | <img src="assets/screenshots/devices.png" width="260" alt="Devices tab with the audio output and a paired pair of earbuds"> |
+| **Shelf** | **Media** | **Devices** |
 
 ## Install
 
 1. Download `notch.exe` from the [latest release](https://github.com/anshthakur0999/notch-windows/releases/latest)
-   and run it. The pill appears at the top of your screen and a tray icon is added.
+   and run it. The pill appears at the top of your screen and an icon is added to the tray.
 2. Optional: right-click the tray icon and tick **Start with Windows**.
 
-Windows 10 or 11, 64-bit. The exe is not code-signed, so Windows SmartScreen may ask you to confirm
-the first time you run it. To check the download, compare
-`certutil -hashfile notch.exe SHA256` with the `notch.exe.sha256` file next to it on the release page.
+Needs Windows 10 or 11 (64-bit). The exe isn't code-signed, so SmartScreen may ask you to confirm the
+first time. To check your download, compare `certutil -hashfile notch.exe SHA256` with the
+`notch.exe.sha256` file on the release page.
 
-To remove it: untick **Start with Windows**, choose **Quit** from the tray menu, then delete
-`notch.exe` and the folder `%APPDATA%\Notch` (your notes, clipboard history and settings).
+**Uninstall:** untick **Start with Windows**, choose **Quit** from the tray menu, then delete
+`notch.exe` and the folder `%APPDATA%\Notch`.
 
 ## Quick start
 
-| Action | How |
+| To | Do this |
 | --- | --- |
-| Open | Hover the pill (it expands after a short dwell), click it, or press a hotkey |
-| Open on the last tab | `Win+Alt+N`: opens the pill (on the notepad at first, then the tab you used last); press again or `Esc` to close |
-| Open the clipboard | `Win+Alt+V`: opens the clipboard list with the search box ready, just start typing |
-| Start a timer | Click **Timer** in the header, type a time such as `25m`, press `Enter` |
-| Add files to the shelf | Drop them on the pill, then open the **Shelf** tab |
-| Play / pause the music | Hover the pill while something plays and press the round button on the right |
-| Switch tab | Click **Notepad** / **Clipboard** / **Timer** / **Shelf** / **Media** / **Devices** in the header, or press `Tab` |
-| Switch the sound output | Click the **Devices** tab, then the output you want; or press **Use for audio** on the card that opens when earbuds connect |
-| Connect, disconnect or pair a Bluetooth device | **Devices** tab: **Disconnect** on a connected device, **Connect** on a paired one, **Add device** to pair a new one |
-| Keep open | The pin in the header: the pill stays open until you unpin it, press `Esc`, or click the chevron |
-| Close | Move the mouse away, `Esc`, the chevron, or click another app |
-| Hide / show the pill | `Win+Alt+H`, the tray menu, or the [commands](#command-line) |
+| Open the pill | Hover it, click it, or press `Win+Alt+N` |
+| Open the clipboard | `Win+Alt+V`, then just start typing to search |
+| Switch tools | Click a tab in the header, or press `Tab` |
+| Keep it open | Click the pin in the header |
+| Close it | Move the mouse away, press `Esc`, or click another app |
+| Hide / show the pill | `Win+Alt+H`, or the tray menu |
 
-If a hotkey is already owned by another app, Notch falls back to `Ctrl+Alt+N` / `Ctrl+Alt+V` /
-`Ctrl+Alt+H`. The tray tooltip always shows which hotkeys are active.
+If another app already uses a hotkey, Notch uses `Ctrl+Alt+N` / `Ctrl+Alt+V` / `Ctrl+Alt+H` instead.
+Hover the tray icon to see which ones are active.
 
 ## Notepad
 
-* Several notes, shown as tabs under the header. **`+`** (or `Ctrl+N`) adds one, `Ctrl+Tab` /
-  `Ctrl+Shift+Tab` cycles through them. Up to 30 notes.
-* When the tabs no longer fit, the row scrolls (mouse wheel or a sideways touchpad swipe over the
-  header; the active tab is always brought into view) and the **`+`** stays pinned at the right end.
-* **Delete** a note with the **x** on its tab (shown on the active tab and on whichever tab you point
-  at), by middle-clicking it, with `Ctrl+W`, or from the right-click menu. A note with text asks
-  first. The **Quick note** (the first note) is permanent: it has no x and Delete does nothing for
-  it, though you can rename it and clear its text yourself. If a notes list ever lacks it, it comes
-  back, empty, as the first tab.
-* **Double-click** a tab to rename it (`Enter` saves, `Esc` cancels). **Right-click** a tab for
-  Rename / Delete.
-* Everything is saved automatically, one second after you stop typing.
+* **`+`** or `Ctrl+N` adds a note; `Ctrl+Tab` / `Ctrl+Shift+Tab` moves between them (up to 30).
+* **Double-click** a tab to rename it. Delete a note with the **x** on its tab, a middle-click,
+  `Ctrl+W` or the right-click menu. A note with text asks before it goes.
+* The first note, **Quick note**, is always there: you can rename and clear it, but not delete it.
+* Everything saves automatically a second after you stop typing.
 
 ## Clipboard
 
-* Type to **search** (the box is focused when opened with the hotkey; click it otherwise). The first
-  `Esc` clears the search, the second closes the pill.
-* Entries are grouped into **PINNED** and **RECENT**, labelled Text / Link / Code / Image with how
-  long ago they were copied.
-* The list is driven with the mouse or trackpad. Click an entry to paste it into the app you were in
-  (hold `Shift` while clicking to only copy it); hover it for the pin and ✕ buttons; scroll with the
-  wheel or a two-finger swipe.
-* Pinned entries never expire. Anything a password manager flags as secret
-  (`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory = 0`) is never
-  recorded, and Notch ignores changes it makes itself. You can also pause capture from the tray menu.
+* Click an entry to paste it into the app you were in. Hold `Shift` while clicking to only copy it.
+* Type to search. `Esc` clears the search, and a second `Esc` closes the pill.
+* Hover an entry to **pin** it (pinned entries are kept forever) or remove it with **✕**.
+* Text, links, code and images are all kept. Passwords copied from a password manager are never
+  recorded. You can pause recording from the tray menu.
+* Each time you copy, the pill briefly widens to say **Copied** and shows what it was. Click it to
+  open the pill.
 
 ## Timer
 
-One timer at a time, on the third tab.
-
-* **Set a time**: type `25m`, `1h 30m`, `90s`, `2 hours` or a bare number (minutes), or tap a chip
-  (5 min, 10 min, 25 min, 45 min, 1 hour). The box shows what it means (`= 25:00`) and when the timer
-  will end. Add an optional label, then press `Enter` or **Start**. Up to 24 hours. Starting a new
-  timer replaces the current one.
-* **While it runs** the tab shows a ring and the time left, with stop (x), pause / resume and
-  **+1 min**. Collapse the pill and it carries on: the resting pill shows the ring and the digits (a
-  play mark while paused), the header's Timer tab shows the time left whichever tab is open, and a
-  copy peek keeps the timer on its right.
-* **Hover** the pill while a timer runs and it widens into a capsule instead of opening the panel:
-  notepad and clipboard buttons, the ring (click to pause or resume) and the time (click to open the
-  Timer tab). Click anywhere else on it to open the panel.
-* **Time's up**: the pill widens and glows with **+5 min** and **Done** until you press one (+5 min
-  starts a fresh five minutes). If the pill is hidden (a full-screen app is in front, or you hid it)
-  Windows shows a notification instead. There is no sound.
-* The timer is not saved (quitting Notch ends it) and does not count time the PC spends asleep.
+* Type a time such as `25m`, `1h 30m`, `90s` or just `10` (minutes), or tap a preset, then press
+  `Enter` or **Start**. You can add a label. One timer at a time, up to 24 hours.
+* While it runs you can pause it, stop it or add a minute. Close the pill and the time left stays
+  on the pill.
+* **When time is up** the pill glows and Windows' alarm sound rings until you press **Done** or
+  **+5 min**. If the pill is hidden, you also get a Windows notification. To change the sound, pick
+  another one for "Alarm 1" in Windows' Sound settings (Sounds tab), or choose None to silence it.
+* The timer isn't saved: quitting Notch ends it, and time the PC spends asleep isn't counted.
 
 ## Shelf
 
-A parking spot for files while you work: drop them on the pill now, drag them out into any app later.
+A place to park files while you work.
 
-* **Add files** by dropping files or folders on the pill from Explorer, the desktop or any app. While
-  you drag, the pill widens into a drop zone and glows when you are over it; on release a small
-  **Added** toast says how many. Dropping on the open panel works too, and so does the **+** slot
-  after the last tile, which opens a file picker (files only; drop a folder to add it). The shelf
-  holds up to 48 files (the oldest go first).
-* **Drag out**: press a tile and drag. Ticked tiles go together (click a tile to tick it); a tile
-  that is not ticked goes alone. The drop is always a copy, so the originals stay where they are.
-  `Esc` cancels a drag.
-* **Remove**: hover a tile and click its **x** to take that one file off the shelf. `Del` removes
-  the ticked tiles, **Clear** empties the shelf. Nothing is ever deleted from disk.
-* The shelf holds **links, not copies**: nothing is duplicated and nothing is moved. If a file is
-  moved or deleted, its tile says **Missing** (UNC network paths are not checked, so they are never
-  marked missing).
-* The resting pill shows a tray and the file count (beside the timer when one runs); hovering shows a
-  shelf button with the count.
-* Files leave the shelf after **24 hours**; set `"shelf_hours"` to change that (0 = keep until
-  removed).
-* Each tile shows the same preview Explorer does: a thumbnail for images, PDFs, videos and the like,
-  otherwise the file's icon. Previews load in the background while the panel is open.
-* Limits: real files only (not images dragged out of a browser), and Windows blocks dragging from an
-  elevated (admin) app onto a normal one.
+* **Add files** by dropping them on the pill, or with the **+** tile. It holds up to 48.
+* **Drag them out** into any app. Click tiles to tick several and drag them together. Dropping
+  always copies, so the originals stay where they are.
+* **Remove** a file with the **x** on its tile, or `Del` for the ticked ones; **Clear** empties the
+  shelf. Nothing is ever deleted from your disk.
+* The shelf keeps links, not copies. If you move or delete a file, its tile says **Missing**.
+* Files leave the shelf after 24 hours (change it with `shelf_hours` in [Settings](#settings)).
+* Things you can't add: images dragged straight out of a browser, and files dragged from an app
+  running as administrator.
 
 ## Media
 
-Shows what is playing and lets you drive it, without opening the app that plays it. Notch reads
-Windows' own media session, which browsers (Chrome, Edge, Firefox and the rest), Spotify and the
-Windows media apps all report to, so there is nothing to install per app. It follows the session
-Windows marks as current.
+Works with anything that shows up in Windows' own media controls: Chrome, Edge, Firefox, Spotify,
+the Windows media apps and most others. There's nothing to set up.
 
-* **On the pill.** While something plays, the resting pill shows its cover and a tiny equaliser; paused,
-  the equaliser becomes a pause mark. Next to a running timer the pill grows a little to hold both;
-  with the shelf as well, the shelf shrinks to a dot.
-* **New track banner.** When the track changes, the pill briefly widens to show the cover, title and
-  artist, then eases back. Not shown while the panel is open, the pill is hidden, or for what was
-  already playing when Notch started.
-* **Hover.** With media on show, resting the pointer on the pill widens it into a capsule with the
-  notepad and clipboard buttons (and the shelf and timer when they are in use), the cover and title,
-  and a play / pause button. Click the cover or title to open the **Media** tab.
-* **The Media tab.** The cover, where it is playing, title and artist, the visualizer, a seek bar
-  with elapsed and remaining time, and previous / play-pause / next. Click the bar to seek. Its line
-  is always there; the knob and the remaining time appear once the player reports the track's length,
-  which most do at once, Zen a few seconds after a track change, and live streams never do. With
-  nothing playing the tab says so.
-* **Bars** switches the visualizer off (the button then reads **Off**). The choice is kept in
-  `settings.json` as `"visualizer"`.
-* Limits: only apps that report to Windows' media session show up (most do; some games and older
-  players do not). It shows one session at a time, and clicking the bar seeks but cannot be dragged.
-  Previous / next are requests to the player, which may ignore them (seen with some YouTube videos in
-  Chrome).
-
-**Privacy.** The visualizer listens to what the speakers are playing (the same loopback Windows uses
-for "what you hear"; never the microphone), turns each 40 ms into bar heights in memory and throws the
-samples away. Nothing is recorded, saved or sent. It listens **only while** music is playing, the
-pill is visible and the bars are on screen (the closed pill, or the Media tab); paused, hidden, on
-another tab or with **Bars** off, no audio is touched at all and no thread runs.
+* The closed pill shows the cover of what's playing. When the track changes it briefly shows the
+  title and artist.
+* The **Media** tab has play / pause, previous / next and a seek bar: click it, or drag it to scrub.
+* Buttons the player doesn't support are greyed out, for example next / previous on a single
+  YouTube video.
+* **Bars** turns the visualizer on or off. It reacts to what your speakers play (never the
+  microphone), only while it's on screen, and nothing is recorded.
 
 ## Devices
 
-Shows what is connected over Bluetooth and how full its battery is, and switches where the sound
-goes in one click. Notch asks Windows to tell it when a paired device connects, disconnects or
-reports a new battery value, so there is nothing to set up. What kind of device it is comes from the
-class Windows records for it when it is paired.
+For Bluetooth earbuds, headphones, mice, keyboards and game controllers that are already paired
+with Windows.
 
-* **The card.** When a paired earbud, headphone, mouse, keyboard or game controller connects, the
-  resting pill widens a little while an azure ring sweeps once round it, then springs open into a
-  card with the device's icon, name and battery percentage with a small bar. Earbuds and headsets
-  also get **Use for audio**, which makes them the default playback device for apps, media and calls
-  without the pill taking keyboard focus. The card stays about 4 seconds (longer while the pointer is
-  on it), the **x** closes it, and clicking anywhere else on it opens the **Devices** tab.
-* **Short banners.** After **Use for audio**: "Now the audio output". When a device disconnects:
-  "*name* disconnected", and if it was the audio output, where the sound went ("Audio back on
-  Speakers"). A device that comes back within 30 seconds gets a small "Reconnected" banner instead of
-  a full card. A battery that falls to 20%, and again to 10%, opens a **Battery low** card, with an
-  icon and the words, not only a colour. Disconnects and reconnects are announced for earbuds and
-  the like only: a mouse or keyboard that dozes off and wakes is not news (a mouse that connects after
-  more than 30 seconds away does get its card).
-* **Quiet by default.** No card for devices that were already connected when Notch started, while the
-  panel is open, while the pill is hidden or a full-screen app is in front. With Windows animation
-  effects off the ring is skipped and the card simply appears. `"device_banner": false` turns every
-  card and banner off; the tab keeps working.
-* **The Devices tab.** **Audio output** is a row of chips, one per active playback device with the
-  default one filled; click another to make it the default for all roles. **Connected** lists each
-  device with its battery and a **Disconnect** button; **Available** lists the paired devices that are
-  not connected, each with **Connect**. The lists update when a device reports a change, and the output
-  list is read when the tab opens.
-* **Connect and Disconnect** are one click, with no confirmation (nothing is lost by a wrong tap). While
-  it works the button is replaced by a ring and the row says *Connecting...* or *Disconnecting...*; the
-  row moves to the other section when Windows reports the change (a connect takes about 6 to 12
-  seconds, a disconnect under one). If the device does not answer (about 12 seconds to connect, 4 to
-  disconnect) the row says so, in red, and offers **Try again** and **Open
-  Bluetooth settings**; it stays until you try again or leave the tab. A connect you started is shown on
-  its row and does not also open the card. If the device you disconnect was the audio output, Windows
-  moves the sound back to another one and the chips show which. Disconnect keeps the pairing.
-* **Add device** searches for nearby devices that are not paired and pairs the one you pick: **Pair**,
-  then, for a keyboard, the code to type on it. The search starts when you open the screen and stops
-  when you press **Stop**, leave the screen or after 30 seconds, so nothing scans in the background.
-  It offers earbuds, headphones, speakers, mice, keyboards and gamepads (what the device says it is);
-  a device that does not say, and phones, are left to Windows' own Bluetooth settings.
-* **Bluetooth off.** The tab says so and offers **Turn on Bluetooth** (Windows may ask first) and
-  **Bluetooth settings**. With nothing paired at all it offers **Add device** instead.
-* **The visualizer follows the switch.** The Media tab's bars listen to the default output; after you
-  switch, they re-attach to the new device within about a second.
+* **When a device connects** the pill shows a card with its battery level. Earbuds also get **Use
+  for audio**, which moves your sound to them. A **Battery low** card appears at 20% and 10%.
+* The **Devices** tab lists:
+  * **Audio output**: click one to send all sound there.
+  * **Connected**: each device with its battery and **Disconnect**.
+  * **Available**: paired devices that aren't connected, with **Connect**. A connect takes about
+    6 to 12 seconds.
+* **Add device** searches for nearby devices and pairs the one you pick. Phones, and devices that
+  need a PIN typed in, are paired from Windows' Bluetooth settings instead.
+* `"device_banner": false` in [Settings](#settings) turns the pop-up cards off; the tab still works.
 
-**What "exact" means.** The percentage is what Windows itself reports for the device
-(`DEVPKEY_Bluetooth_Battery`, the same value Windows Settings shows), read when Windows reports it.
-When Windows has no value Notch says **Battery unknown** rather than guess. Limits you should know
-about:
+Good to know:
 
-* AirPods and most earbuds report one value at best, and Windows does not say what it measures:
-  on some earbuds (seen on a OnePlus Buds 4) it is the case, not a bud. Left bud, right bud and
-  case separately need Apple's undocumented Bluetooth advertisements or a vendor's own protocol,
-  which Notch does not read.
-* Mice behind a vendor receiver (Logitech Unifying, Bolt), and PlayStation controllers over Bluetooth,
-  report nothing through Windows' standard property, so they show **Battery unknown**. Notch does not
-  speak vendor protocols, and it does not use `Windows.Gaming.Input`, so an Xbox controller shows
-  whatever Windows exposes for it as a Bluetooth device (coarse steps, or unknown).
-* Only devices **paired over Bluetooth** are seen (classic Bluetooth and Bluetooth LE); a USB
-  controller or one on the Xbox wireless adapter is not. Only what Windows classes as audio, mouse,
-  keyboard or gamepad is shown; phones, watches and PCs are ignored.
-* **Connect and Disconnect** work on devices Windows lists as classic Bluetooth, which includes
-  earbuds, most keyboards and many gamepads. Disconnect is the Bluetooth driver's own request to drop
-  the link (`IOCTL_BTH_DISCONNECT_DEVICE`); Windows has no call to connect, so Connect switches the
-  device's audio (or input) service off and on again, which takes Windows about six seconds and makes it
-  connect to the device. Both are what the
-  Win32 Bluetooth API offers rather than documented features, so a device that is off, out of range or
-  asleep will not answer, and a device may reconnect by itself after a disconnect (many earbuds do when
-  they are taken out of the case). After a Connect the earbuds' playback device can take 15 to 30
-  seconds to come up; the output chips follow it. Bluetooth LE devices, such as many modern mice, are connected by
-  Windows itself: they are listed, without a button. Pairings Windows keeps for a Bluetooth adapter
-  this PC no longer has are listed as paired by Windows but cannot be connected, so they are hidden.
-* **Add device** answers the two pairing requests a device without a screen makes ("pair?" and "type
-  this code on it"). A device that needs a PIN typed here, or two numbers compared, is paired from
-  Windows' Bluetooth settings. Nearby devices are listed once even when Windows sees them through both
-  Bluetooth and Bluetooth LE, and at most twelve.
-* **Use for audio** needs the device's playback device to exist, which can take a couple of seconds
-  after it connects; if there is none yet the banner says so and nothing changes. It uses
-  `IPolicyConfig`, an interface Windows does not document (the one SoundSwitch and NirCmd use), so a
-  future Windows update could break the switch; the rest of Notch does not depend on it.
-* "Audio back on ..." is a best effort: Notch checks whether the device was the default output when
-  the disconnect arrives, and where the sound went about a second later. If Windows has already moved
-  the sound by then, you get the plain "disconnected" banner.
+* The battery level is what Windows reports, the same number as in Windows Settings. Some earbuds
+  report the case rather than the buds. Mice on a USB receiver (Logitech Unifying or Bolt) and
+  PlayStation controllers show **Battery unknown**.
+* Devices on USB, or on a non-Bluetooth wireless adapter, don't appear.
+* Bluetooth LE devices, such as many newer mice, are connected by Windows itself, so they have no
+  Connect button.
+* Audio switching uses a part of Windows that Microsoft doesn't document, so a Windows update could
+  break it. The rest of Notch would keep working.
 
-## Copy peek
+## Tray menu
 
-Each time you copy, the collapsed pill widens into a capsule that says **Copied** and shows what it
-was, then shrinks back. It holds for about 2 s, then eases back.
+Right-click the tray icon for: Open, Hide / Show pill, **Theme** (Dark, Light or Match Windows),
+**Accent colour**, **Text size** (for notes and clipboard entries), **Monitor** (which screen the
+pill sits on), Pause clipboard capture, Start with Windows, and Quit. Changes apply straight away.
 
-* Short text shows in full; long text is cut with an ellipsis. An image shows a small thumbnail and
-  its size (`Image · 1280 × 720`).
-* Copying again while it is up cross-fades to the new content and holds again. It stays up while the
-  cursor is on it. Click it to open the pill.
-* No peek when it would only be noise: the panel is already open, the pill is hidden or a full-screen
-  app is in front, capture is paused, or the copy is one Notch ignores (password managers, its own
-  pastes).
-* With Windows animation effects off (Settings > Accessibility > Visual effects) the capsule
-  cross-fades instead of widening.
-* Privacy: `"copy_peek_preview": false` shows only "Copied", never the content. `"copy_peek": false`
-  turns the peek off altogether.
-
-## Tray menu and looks
-
-Right-click the tray icon for: Open · Hide/Show pill · Theme · Accent colour · Text size · Monitor ·
-Pause clipboard capture · Start with Windows · Quit. The look settings apply immediately and are
-saved to `settings.json`, so there is nothing to edit and no restart.
-
-* **Theme**: Dark (default), Light, or Match Windows (follows Windows' app light/dark mode and
-  switches with it).
-* **Accent colour**: Classic keeps the logo's two tones (amber notepad, cyan clipboard) and gives the
-  timer its own violet; Sky, Amber, Mint, Violet and Rose use one colour for all the tabs, the
-  selected entry and the copy peek's check.
-* **Text size**: Small, Default or Large for the text you read: the notes and the clipboard entries.
-  The header, tabs and hints keep their size.
-* **Monitor**: which display the pill sits on. It follows the primary display unless you pick another
-  one, and goes back to the primary one if the chosen display is unplugged.
-
-The tray icon uses bright colours on a dark taskbar and deeper tones on a light one, and switches by
-itself when you change Windows' light/dark mode.
+The pill hides itself while a full-screen app or game is in front, and comes back when you leave
+it.
 
 ## Command line
 
-While Notch is running, run these from any terminal (or a shortcut, script or launcher) to control it:
+While Notch is running you can control it from a terminal, shortcut or script:
 
 ```
-notch.exe hide       hide the pill from the screen
+notch.exe hide       hide the pill
 notch.exe show       bring it back
-notch.exe toggle     hide it if visible, show it if hidden
+notch.exe toggle     hide or show it
 notch.exe quit       close Notch
-notch.exe --hidden   start Notch with the pill hidden (handy for autostart)
+notch.exe --hidden   start Notch with the pill hidden
 notch.exe help       list the commands
 ```
 
-A leading `-`, `--` or `/` is optional and case doesn't matter (`notch.exe --Hide` works). While
-hidden, Notch keeps recording the clipboard and the hotkeys stay registered, but the open hotkeys
-(`Win+Alt+N` / `Win+Alt+V`) do nothing until you show the pill again. Hiding is not remembered across
-restarts. If Notch isn't running, the commands just tell you so.
+While the pill is hidden, Notch still records your clipboard, but the open hotkeys do nothing.
 
 ## Settings
 
-The tray menu covers the look. Everything else is in an optional file,
-`%APPDATA%\Notch\settings.json`. All keys are optional, and you need to restart Notch to apply edits.
+Most people never need this. The tray menu covers the look; everything else lives in
+`%APPDATA%\Notch\settings.json`. Every key is optional. Restart Notch after editing.
 
 | Key | Default | What it does |
 | --- | --- | --- |
 | `hotkey_toggle` | `"Win+Alt+N"` | Opens / closes the pill |
-| `hotkey_clipboard` | `"Win+Alt+V"` | Opens the pill on the clipboard tab |
+| `hotkey_clipboard` | `"Win+Alt+V"` | Opens the clipboard |
 | `hotkey_visibility` | `"Win+Alt+H"` | Hides / shows the pill |
-| `hover_dwell_ms` | `120` | How long the cursor rests on the pill before it opens |
-| `collapse_delay_ms` | `100` | How long after the cursor leaves before it closes |
-| `max_items` | `200` | Unpinned clipboard entries kept |
-| `max_image_mb` | `200` | Disk space for unpinned clipboard images |
-| `paste_on_click` | `true` | Clicking a clipboard entry also pastes it into the previous app |
-| `copy_peek` | `true` | The "Copied" capsule |
-| `copy_peek_preview` | `true` | Show what was copied in the capsule |
-| `copy_peek_ms` | `2000` | How long the capsule stays up |
-| `device_banner` | `true` | The card and banners when a Bluetooth device connects, disconnects or runs low; `false` leaves only the **Devices** tab |
-| `shelf_hours` | `24` | Files leave the shelf after this long (`0` = never) |
-| `visualizer` | `true` | The media bars move with the music (the **Bars** switch on the Media tab); `false` never samples audio |
+| `hover_dwell_ms` | `120` | How long to hover before the pill opens |
+| `collapse_delay_ms` | `100` | How long after the mouse leaves before it closes |
+| `max_items` | `200` | Clipboard entries kept (pinned ones don't count) |
+| `max_image_mb` | `200` | Disk space for clipboard images |
+| `paste_on_click` | `true` | Clicking a clipboard entry also pastes it |
+| `copy_peek` | `true` | Show the "Copied" pop-up |
+| `copy_peek_preview` | `true` | Show what was copied in it (`false` shows only "Copied") |
+| `copy_peek_ms` | `2000` | How long the "Copied" pop-up stays |
+| `device_banner` | `true` | Bluetooth connect, disconnect and low-battery cards |
+| `shelf_hours` | `24` | How long files stay on the shelf (`0` = until removed) |
+| `visualizer` | `true` | The moving bars for music |
 | `theme` | `"dark"` | `dark`, `light` or `system` |
 | `accent` | `"classic"` | `classic`, `sky`, `amber`, `mint`, `violet` or `rose` |
 | `text_size` | `"medium"` | `small`, `medium` or `large` |
-| `monitor` | `""` | A display's device name such as `\\.\DISPLAY2` (empty = the primary display) |
-| `use_gpu` | `false` | Draw on the GPU instead of the software rasteriser |
+| `monitor` | `""` | A display name such as `\\.\DISPLAY2` (empty = the main display) |
+| `use_gpu` | `false` | Draw with the graphics card (uses about 55 MB more memory) |
 
-Hotkeys are written like `Win+Alt+N` or `Ctrl+Alt+F9`. `theme`, `accent`, `text_size` and `monitor`
-are what the tray menu changes; Notch rewrites the file when you use it, and a value it does not
-know falls back to the default.
+Hotkeys are written like `Win+Alt+N` or `Ctrl+Alt+F9`.
 
-`use_gpu` is off by default: drawing a pill is trivial work, and using the GPU makes Windows load the
-graphics vendor's user-mode driver, which cost about 55 MB more RAM in testing (Intel). The software
-rasteriser (WARP) takes about 1 ms of the main thread per animation frame, but its own worker
-threads add several more milliseconds of CPU for each frame drawn, which is why only the
-visualizer, which redraws many times a second, shows up in the CPU figures below.
+## Your data
 
-## Where your data lives
-
-Everything is in `%APPDATA%\Notch`: `notes.json` and `notes\<id>.txt` (the notepad), `clips.json`
-(index) and `clips\` (payloads), `shelf.json` (the paths on the shelf) and `settings.json`. A single
-`notes.txt` from an earlier version is migrated automatically. If `notes.json` is ever unreadable it
-is kept as `notes.json.bad` rather than overwritten.
-
-## Why it is light
-
-* **Event-driven.** The UI thread blocks in `GetMessageW`; there are no polling timers. The 60 fps
-  frame loop exists only while the pill is animating, then the thread goes back to sleep. The copy
-  peek rides on the clipboard event and one one-shot timer, so it costs nothing between copies.
-* **Clipboard capture uses `WM_CLIPBOARDUPDATE`**, not polling. Image encoding (DIB → PNG +
-  thumbnail through WIC) runs on a short-lived worker thread.
-* **Small resident set.** The index only holds short text previews; full text and images stay on
-  disk and are read only when pasted. Thumbnails (clipboard and shelf) are decoded while the pill is
-  open and dropped when it closes. The notepad control is created the first time it is shown.
-* **The timer ticks only while it runs.** One one-shot Windows timer, set for the exact moment the
-  displayed second changes, redraws the digits and the ring once a second; paused, stopped or idle,
-  nothing wakes up.
-* **Media is callback-driven.** One worker thread asks Windows to call back when the track, the play
-  state or the position changes, and sleeps in between; nothing polls. The cover is decoded once per
-  track and kept (about 260 KB) only while something plays.
-* **Devices are callback-driven too, and cost a little all the time.** One worker thread and two Windows
-  device watchers (classic Bluetooth and Bluetooth LE) ask Windows to call back when a paired device
-  appears or connects, and a third small watcher per *connected* device reports its battery when it
-  changes; the thread sleeps in between and nothing polls, so there is no timer and no CPU while
-  nothing changes. The price is that the two main watchers run for as long as Notch does: measured on
-  this machine, about 7.5 MB more working set (2.7 MB of it private) and four more threads, with 0 ms of
-  CPU over 15 s idle (a debug test build, with nothing connected; the per-device watchers were not
-  separately measured). The Bluetooth radio's on / off state is one more callback. The playback devices
-  are read only when you open the Devices tab, press **Use for audio** or a device connects or goes.
-* **Connect, Disconnect and Add device cost something only while you use them.** A click starts a short
-  thread that waits for the answer and ends. **Add device** starts two more Windows watchers (the
-  search) that stop when you leave the screen or after 30 seconds. While a ring is turning, the
-  Devices tab redraws about 30 times a second, and not otherwise.
-* **The visualizer costs something, only while it shows.** Each redraw of the pill costs a few
-  milliseconds of CPU on the software rasteriser, so the closed pill's bars update 8 times a
-  second and the Media tab's 20. The listening thread starts when music plays and the bars are visible
-  and ends otherwise.
-* **Click-through.** The window region is clipped to the visible pill, so clicks around it reach the
-  windows underneath.
-* **Hides itself** while a full-screen app or game is in front, and comes back when you switch to
-  another window or leave full screen (event-driven, no polling). Windows keeps saying "full-screen
-  app" after you switch away from one, so Notch also checks that the window in front fills the
-  pill's display.
-
-Measured on this branch (Windows 11, software rasteriser): 0.0 ms of CPU over 15 s idle with nothing
-playing, and 0.0 ms with music playing and **Bars** off; with music playing and the bars on, about
-2 to 3% of one core on the closed pill and 15 to 20% while the Media tab is open (a test track that
-never sits still; with `use_gpu` on, about 2% and 9%). About 14 MB private working set idle and 19 MB while a cover is held (before the Devices watchers
-above, which add about 3 MB private), a 968 KB executable.
+Everything stays on your PC in `%APPDATA%\Notch`: your notes, clipboard history, shelf and
+settings. Nothing is sent anywhere. To start fresh, quit Notch and delete that folder.
 
 ## Build from source
 
-Requires the Rust toolchain for Windows (MSVC, edition 2024, so Rust 1.85 or newer) and the Visual
-Studio C++ Build Tools.
+You need Rust 1.85 or newer (MSVC toolchain) and the Visual Studio C++ Build Tools.
 
 ```
 cargo test
-cargo build --release      # target\release\notch.exe
+cargo build --release      # creates target\release\notch.exe
 ```
 
-Set the environment variable `NOTCH_LOG=1` before launching to write a debug log to
-`%TEMP%\notch.log`. `NOTCH_REDUCED_MOTION=1` forces the copy peek's cross-fade (for testing it
-without changing the Windows setting).
+Set `NOTCH_LOG=1` before starting Notch to write a debug log to `%TEMP%\notch.log`.
