@@ -159,6 +159,11 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
 /// half of a surrogate pair (`high` holds the first half until the second arrives). Returns true
 /// if the text changed.
 fn type_into(high: &Cell<u16>, s: &mut String, c: u16, max: usize) -> bool {
+    // a first half waits only for the unit right after it: anything else drops it, or a stray second
+    // half later would pair with it
+    if !(0xD800..0xE000).contains(&c) {
+        high.set(0);
+    }
     match c {
         0x08 => s.pop().is_some(),
         c if c < 0x20 || c == 0x7F => false, // Enter, Esc, Ctrl+letter...
@@ -3200,6 +3205,9 @@ mod tests {
         assert_eq!(typed("", &units[1..], 10), ("".into(), 0));
         // backspace removes the whole emoji, not half of it
         assert_eq!(typed("a😀", &[0x08], 10), ("a".into(), 1));
+        // a first half followed by an ordinary key is dropped: a stray second half later pairs with nothing
+        assert_eq!(typed("", &[units[0], b'a' as u16, units[1]], 10), ("a".into(), 1));
+        assert_eq!(typed("x", &[units[0], 0x08, units[1]], 10), ("".into(), 1), "backspace drops it too");
     }
 
     #[test]
