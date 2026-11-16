@@ -551,7 +551,17 @@ pub fn unwatch_fullscreen(hwnd: HWND) {
 /// so for those the window in front must fill the display too.
 pub fn fullscreen_app_active(pill: HWND) -> bool {
     let Ok(s) = (unsafe { SHQueryUserNotificationState() }) else { return false };
-    s == QUNS_PRESENTATION_MODE || ((s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN) && foreground_fills_display(pill))
+    hides_for(s, || foreground_fills_display(pill))
+}
+
+/// A presentation always hides the pill; a full-screen app or game only while its window fills the display.
+fn hides_for(s: QUERY_USER_NOTIFICATION_STATE, fills: impl FnOnce() -> bool) -> bool {
+    s == QUNS_PRESENTATION_MODE || ((s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN) && fills())
+}
+
+/// The desktop fills the display too, and is not a full-screen app.
+fn is_desktop(class: &str) -> bool {
+    matches!(class, "Progman" | "WorkerW")
 }
 
 fn foreground_fills_display(pill: HWND) -> bool {
@@ -559,8 +569,7 @@ fn foreground_fills_display(pill: HWND) -> bool {
         let fg = GetForegroundWindow();
         let mut class = [0u16; 32];
         let n = GetClassNameW(fg, &mut class).max(0) as usize;
-        // the desktop fills the display too, and is not a full-screen app
-        if fg.0.is_null() || matches!(String::from_utf16_lossy(&class[..n]).as_str(), "Progman" | "WorkerW") {
+        if fg.0.is_null() || is_desktop(&String::from_utf16_lossy(&class[..n])) {
             return false;
         }
         let mut win = RECT::default();
@@ -593,5 +602,23 @@ mod tests {
         assert!(!covers(&rect(-8, -8, 1928, 1032), &display), "maximised: stops at the taskbar");
         assert!(!covers(&rect(1920, 0, 3840, 1080), &display), "full screen on the other display");
         assert!(!covers(&rect(300, 200, 1000, 620), &display), "an ordinary window");
+    }
+
+    #[test]
+    fn a_full_screen_app_left_behind_another_window_does_not_hide_the_pill() {
+        // Windows reports BUSY / D3D for as long as the full-screen app exists (81b5ce4)
+        for s in [QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN] {
+            assert!(hides_for(s, || true), "{s:?} in front: hide");
+            assert!(!hides_for(s, || false), "{s:?} behind another window: stay visible");
+        }
+        assert!(hides_for(QUNS_PRESENTATION_MODE, || false), "a presentation always hides");
+        assert!(!hides_for(QUNS_ACCEPTS_NOTIFICATIONS, || true), "normal desktop use never hides");
+        assert!(!hides_for(QUNS_QUIET_TIME, || true));
+    }
+
+    #[test]
+    fn the_desktop_is_not_a_full_screen_app() {
+        assert!(is_desktop("Progman") && is_desktop("WorkerW"));
+        assert!(!is_desktop("Chrome_WidgetWin_1") && !is_desktop(""));
     }
 }
