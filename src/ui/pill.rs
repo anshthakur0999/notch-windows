@@ -289,3 +289,40 @@ fn draw_header(r: &Renderer, v: &View, alpha: f32) {
     let ch_c = if v.hover == Hit::BtnCollapse { pal.text } else { pal.muted };
     r.chevron_up(ch.cx(), ch.cy(), 5.5, color(ch_c, alpha));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_resting_pill_is_a_capsule_and_the_open_one_has_the_panel_radius() {
+        assert_eq!(progress(COLLAPSED_H), 0.0);
+        assert_eq!(progress(EXPANDED_H), 1.0);
+        assert_eq!(progress(0.0), 0.0, "the spring's undershoot is clamped");
+        assert_eq!(progress(EXPANDED_H + 50.0), 1.0, "and so is its overshoot");
+        assert_eq!(radius(COLLAPSED_H), COLLAPSED_H / 2.0);
+        assert_eq!(radius(EXPANDED_H), RADIUS_OPEN);
+    }
+
+    #[test]
+    fn the_corners_grow_smoothly_and_stay_a_capsule_at_most() {
+        let mut last = 0.0;
+        let mut h = COLLAPSED_H;
+        while h <= EXPANDED_H {
+            let r = radius(h);
+            assert!(r >= last, "radius shrank at h={h}");
+            // near the peek height the eased radius runs ~0.1 px past half the height; D2D clamps that
+            assert!(r <= h / 2.0 + 0.15, "radius {r} too big for h={h}");
+            last = r;
+            h += 1.0;
+        }
+    }
+
+    #[test]
+    fn smoothstep_is_clamped_and_eases() {
+        assert_eq!(smoothstep(0.55, 1.0, 0.0), 0.0);
+        assert_eq!(smoothstep(0.55, 1.0, 2.0), 1.0);
+        assert!((smoothstep(0.0, 1.0, 0.5) - 0.5).abs() < 1e-6);
+        assert!(smoothstep(0.0, 1.0, 0.1) < 0.1, "starts slower than linear");
+    }
+}

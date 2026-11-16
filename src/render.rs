@@ -878,3 +878,29 @@ pub fn wait_vsync() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colours_split_into_channels_and_blend_per_channel() {
+        let c = color(0x336699, 0.5);
+        assert_eq!((c.r, c.g, c.b, c.a), (0x33 as f32 / 255.0, 0x66 as f32 / 255.0, 0x99 as f32 / 255.0, 0.5));
+        assert_eq!(mix(0x000000, 0xFFFFFF, 0.0), 0x000000);
+        assert_eq!(mix(0x000000, 0xFFFFFF, 1.0), 0xFFFFFF);
+        assert_eq!(mix(0x000000, 0xFFFFFF, 0.5), 0x808080);
+        assert_eq!(mix(0xFF0000, 0x0000FF, 0.5), 0x800080, "channels never bleed into each other");
+        assert_eq!(mix(0x102030, 0xFFFFFF, -1.0), 0x102030, "t is clamped");
+        assert_eq!(mix(0x102030, 0xFFFFFF, 2.0), 0xFFFFFF);
+    }
+
+    #[test]
+    fn only_a_lost_device_rebuilds_the_renderer() {
+        for code in [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, D2DERR_RECREATE_TARGET] {
+            assert!(is_device_lost(&Error::from(code)));
+        }
+        assert!(!is_device_lost(&Error::from(E_FAIL)));
+        assert!(!is_device_lost(&Error::from(E_OUTOFMEMORY)));
+    }
+}
