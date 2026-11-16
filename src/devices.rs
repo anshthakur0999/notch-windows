@@ -16,7 +16,7 @@
 //! protocols, no guessing.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::Devices::Bluetooth::{BluetoothDevice, BluetoothLEDevice};
@@ -35,6 +35,8 @@ pub const LOW_AT: u8 = 20;
 pub const VERY_LOW_AT: u8 = 10;
 /// A device that comes back this soon after it went is a reconnect, not news.
 pub const QUICK_BACK: Duration = Duration::from_secs(30);
+/// Listing what is paired takes well under a second; a watcher not done by this has aborted.
+const LIST_WAIT: Duration = Duration::from_secs(10);
 
 // what the paired-device entries are asked for
 const CONNECTED: &str = "System.Devices.Aep.IsConnected";
@@ -502,14 +504,6 @@ pub(crate) fn watch(le: bool, paired: bool, tx: &Sender<Msg>) -> Option<DeviceWa
         Ok(())
     }))
     .ok()?;
-    // a watcher that aborts before it has listed everything never completes: without this the
-    // worker would wait for it for ever and never announce a connection
-    let t = tx.clone();
-    w.Stopped(&TypedEventHandler::new(move |_, _| {
-        let _ = t.send(Msg::Listed);
-        Ok(())
-    }))
-    .ok()?;
     w.Start().ok()?;
     Some(w)
 }
@@ -594,8 +588,25 @@ fn run() {
     let mut batteries: HashMap<String, DeviceWatcher> = HashMap::new();
     let mut shown: (Vec<Device>, Vec<Device>, bool) = (Vec::new(), Vec::new(), true);
     let mut radio_on = true;
-    // sleeps here until Windows reports something
-    while let Ok(m) = rx.recv() {
+    // An aborted watcher raises no more events, EnumerationCompleted included, so the listing is not
+    // waited for past this: what was listed by then is what was already connected.
+    let listed_by = Instant::now() + LIST_WAIT;
+    loop {
+        // sleeps here until Windows reports something
+        let m = if waiting == 0 {
+            rx.recv().ok()
+        } else {
+            match rx.recv_timeout(listed_by.saturating_duration_since(Instant::now())) {
+                Ok(m) => Some(m),
+                Err(RecvTimeoutError::Timeout) => {
+                    crate::log(&format!("devices: {waiting} watcher(s) never finished listing; going on without them"));
+                    waiting = 1; // the Listed below takes it to 0
+                    Some(Msg::Listed)
+                }
+                Err(RecvTimeoutError::Disconnected) => None,
+            }
+        };
+        let Some(m) = m else { break };
         let now = Instant::now();
         let events = match m {
             Msg::Radio(on) => {
