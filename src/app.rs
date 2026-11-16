@@ -155,6 +155,36 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetKeyState(vk.0 as i32) < 0 }
 }
 
+/// Applies one `WM_CHAR` to a text box (at most `max` characters): backspace, a character, or
+/// half of a surrogate pair (`high` holds the first half until the second arrives). Returns true
+/// if the text changed.
+fn type_into(high: &Cell<u16>, s: &mut String, c: u16, max: usize) -> bool {
+    match c {
+        0x08 => s.pop().is_some(),
+        c if c < 0x20 || c == 0x7F => false, // Enter, Esc, Ctrl+letter...
+        c if (0xD800..0xDC00).contains(&c) => {
+            high.set(c); // first half of an emoji etc.
+            false
+        }
+        c => {
+            let ch = if (0xDC00..0xE000).contains(&c) {
+                let hi = high.replace(0);
+                // with no first half pending, [0, c] would decode as a NUL
+                (hi != 0).then(|| char::decode_utf16([hi, c]).next().and_then(|r| r.ok())).flatten()
+            } else {
+                char::from_u32(c as u32)
+            };
+            match ch {
+                Some(ch) if s.chars().count() < max => {
+                    s.push(ch);
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
 /// The colours for the current theme and accent. `Theme::System` follows Windows' app mode.
 fn palette_for(s: &Settings) -> Palette {
     let light = match s.theme {
@@ -2335,34 +2365,6 @@ impl App {
         self.invalidate();
     }
 
-    /// Applies one `WM_CHAR` to a text box (at most `max` characters): backspace, a character, or
-    /// half of a surrogate pair. Returns true if the text changed.
-    fn type_into(&self, s: &mut String, c: u16, max: usize) -> bool {
-        match c {
-            0x08 => s.pop().is_some(),
-            c if c < 0x20 || c == 0x7F => false, // Enter, Esc, Ctrl+letter...
-            c if (0xD800..0xDC00).contains(&c) => {
-                self.high_surrogate.set(c); // first half of an emoji etc.
-                false
-            }
-            c => {
-                let ch = if (0xDC00..0xE000).contains(&c) {
-                    let hi = self.high_surrogate.replace(0);
-                    char::decode_utf16([hi, c]).next().and_then(|r| r.ok())
-                } else {
-                    char::from_u32(c as u32)
-                };
-                match ch {
-                    Some(ch) if s.chars().count() < max => {
-                        s.push(ch);
-                        true
-                    }
-                    _ => false,
-                }
-            }
-        }
-    }
-
     /// `WM_CHAR`: typing edits the clipboard search box, or a box of the timer's form.
     fn on_char(&self, c: u16) {
         if !self.expanded() || self.renaming.get().is_some() {
@@ -2370,7 +2372,7 @@ impl App {
         }
         match self.tab.get() {
             Tab::Clipboard => {
-                if self.type_into(&mut self.query.borrow_mut(), c, 200) {
+                if type_into(&self.high_surrogate, &mut self.query.borrow_mut(), c, 200) {
                     self.query_changed();
                 }
             }
@@ -2379,7 +2381,7 @@ impl App {
                     TimerField::Time => (&self.timer_input, 12),
                     TimerField::Label => (&self.timer_label, 30),
                 };
-                if self.type_into(&mut text.borrow_mut(), c, max) {
+                if type_into(&self.high_surrogate, &mut text.borrow_mut(), c, max) {
                     self.invalidate();
                 }
             }
@@ -3118,5 +3120,49 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feeds UTF-16 units the way `WM_CHAR` delivers them; returns the text and how many changed it.
+    fn typed(start: &str, units: &[u16], max: usize) -> (String, usize) {
+        let high = Cell::new(0);
+        let mut s = start.to_string();
+        let n = units.iter().filter(|&&c| type_into(&high, &mut s, c, max)).count();
+        (s, n)
+    }
+
+    #[test]
+    fn typing_adds_characters_and_backspace_removes_one() {
+        assert_eq!(typed("", &[b'h' as u16, b'i' as u16], 10), ("hi".into(), 2));
+        assert_eq!(typed("abc", &[0x08], 10), ("ab".into(), 1));
+        assert_eq!(typed("", &[0x08], 10), ("".into(), 0), "backspace on an empty box changes nothing");
+    }
+
+    #[test]
+    fn control_keys_type_nothing() {
+        // Enter, Esc, Tab, Ctrl+A, Del
+        assert_eq!(typed("x", &[0x0D, 0x1B, 0x09, 0x01, 0x7F], 10), ("x".into(), 0));
+    }
+
+    #[test]
+    fn an_emoji_arrives_in_two_halves_and_becomes_one_character() {
+        let units: Vec<u16> = "😀".encode_utf16().collect();
+        assert_eq!(typed("", &units, 10), ("😀".into(), 1));
+        // a lone second half is not a character
+        assert_eq!(typed("", &units[1..], 10), ("".into(), 0));
+        // backspace removes the whole emoji, not half of it
+        assert_eq!(typed("a😀", &[0x08], 10), ("a".into(), 1));
+    }
+
+    #[test]
+    fn the_limit_counts_characters_not_bytes() {
+        assert_eq!(typed("ab", &[b'c' as u16, b'd' as u16], 3), ("abc".into(), 1));
+        let units: Vec<u16> = "é😀".encode_utf16().collect();
+        assert_eq!(typed("", &units, 2), ("é😀".into(), 2));
+        assert_eq!(typed("é😀", &[b'x' as u16], 2), ("é😀".into(), 0));
     }
 }
