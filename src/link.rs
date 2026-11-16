@@ -16,7 +16,7 @@ use windows::Win32::Devices::Bluetooth::{
     BluetoothEnumerateInstalledServices, BluetoothFindFirstRadio, BluetoothFindNextRadio, BluetoothFindRadioClose,
     BluetoothGetDeviceInfo, BluetoothGetRadioInfo, BluetoothSetServiceState, BLUETOOTH_RADIO_INFO,
 };
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, HANDLE};
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::core::GUID;
 
@@ -110,13 +110,12 @@ fn radios() -> Vec<HANDLE> {
 pub fn disconnect(addr: u64) -> bool {
     let mut asked = false;
     for radio in radios() {
-        let r = unsafe { DeviceIoControl(radio, DISCONNECT, Some((&addr as *const u64).cast::<c_void>()), 8, None, 0, None, None) };
-        let _ = unsafe { CloseHandle(radio) };
-        crate::log(&format!("link: disconnect {addr:012X}: {r:?}"));
-        if r.is_ok() {
-            asked = true;
-            break;
+        if !asked {
+            let r = unsafe { DeviceIoControl(radio, DISCONNECT, Some((&addr as *const u64).cast::<c_void>()), 8, None, 0, None, None) };
+            crate::log(&format!("link: disconnect {addr:012X}: {r:?}"));
+            asked = r.is_ok();
         }
+        let _ = unsafe { CloseHandle(radio) }; // every radio's, also the ones after the one that took it
     }
     asked && settle(addr, false, DISCONNECT_WAIT)
 }
@@ -131,6 +130,11 @@ pub fn connect(addr: u64) -> bool {
     let mut n = 32u32;
     let mut found = [GUID::zeroed(); 32];
     let err = unsafe { BluetoothEnumerateInstalledServices(None, &i, &mut n, Some(found.as_mut_ptr())) };
+    // more than 32 services only means the first 32 were filled in; any other failure filled in none
+    if err != 0 && err != ERROR_MORE_DATA.0 {
+        crate::log(&format!("link: connect {addr:012X}: no services ({err})"));
+        return false;
+    }
     let services = order(found[..n.min(32) as usize].to_vec());
     crate::log(&format!("link: connect {addr:012X}: {} service(s), enumerate={err}", services.len()));
     let start = Instant::now();
