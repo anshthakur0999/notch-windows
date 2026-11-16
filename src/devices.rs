@@ -16,7 +16,7 @@
 //! protocols, no guessing.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::Devices::Bluetooth::{BluetoothDevice, BluetoothLEDevice};
@@ -35,6 +35,8 @@ pub const LOW_AT: u8 = 20;
 pub const VERY_LOW_AT: u8 = 10;
 /// A device that comes back this soon after it went is a reconnect, not news.
 pub const QUICK_BACK: Duration = Duration::from_secs(30);
+/// Listing what is paired takes well under a second; a watcher not done by this has aborted.
+const LIST_WAIT: Duration = Duration::from_secs(10);
 
 // what the paired-device entries are asked for
 const CONNECTED: &str = "System.Devices.Aep.IsConnected";
@@ -139,6 +141,9 @@ pub struct Update {
     pub connected: Option<bool>,
     pub battery: Option<u8>,
     pub kind: Option<Kind>,
+    /// What Windows groups the device's objects under: the same for its Bluetooth and Bluetooth LE
+    /// entries, and where its battery is.
+    pub container: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -148,9 +153,20 @@ struct Entry {
     connected: bool,
     kind: Option<Kind>,
     battery: Option<u8>,
+    container: Option<String>,
     /// It connected after the watchers had listed what was paired (so it is news once it is
     /// known to be a peripheral, which Windows may only say a moment after the connection).
     fresh: bool,
+}
+
+/// Whether two entries are one physical device listed twice (Bluetooth and Bluetooth LE). Windows
+/// puts both in one container; only while that is not known does the name stand in for it, so two
+/// controllers with the same name stay two.
+fn same_device(a: &Entry, b: &Entry) -> bool {
+    match (&a.container, &b.container) {
+        (Some(x), Some(y)) => x == y,
+        _ => !a.name.is_empty() && a.name == b.name,
+    }
 }
 
 /// Every paired device Windows has told us about, and what changed.
@@ -174,7 +190,7 @@ impl Registry {
     /// but no classic class, and it is the classic entry that reports the connection).
     fn kind_at(&self, i: usize) -> Option<Kind> {
         let e = &self.entries[i];
-        e.kind.or_else(|| self.entries.iter().filter(|o| !e.name.is_empty() && o.name == e.name).find_map(|o| o.kind))
+        e.kind.or_else(|| self.entries.iter().filter(|o| same_device(e, o)).find_map(|o| o.kind))
     }
 
     /// Whether entry `i` is connected and a peripheral Notch shows.
@@ -193,7 +209,7 @@ impl Registry {
         let addr = self
             .entries
             .iter()
-            .filter(|o| o.id == e.id || (!e.name.is_empty() && o.name == e.name))
+            .filter(|o| o.id == e.id || same_device(e, o))
             .find_map(|o| crate::link::classic_address(&o.id));
         Some(Device { id: e.id.clone(), name: e.name.clone(), kind: self.kind_at(i)?, battery: e.battery, addr })
     }
@@ -201,7 +217,7 @@ impl Registry {
     /// Takes in one report; returns what is news.
     pub fn apply(&mut self, u: Update, now: Instant) -> Vec<Event> {
         let i = self.entries.iter().position(|e| e.id == u.id).unwrap_or_else(|| {
-            self.entries.push(Entry { id: u.id.clone(), name: String::new(), connected: false, kind: None, battery: None, fresh: false });
+            self.entries.push(Entry { id: u.id.clone(), name: String::new(), connected: false, kind: None, battery: None, container: None, fresh: false });
             self.entries.len() - 1
         });
         let (before, was) = (self.entries[i].clone(), self.visible_at(i));
@@ -212,14 +228,20 @@ impl Registry {
         }
         e.kind = u.kind.or(e.kind);
         e.battery = u.battery.or(e.battery);
+        if u.container.is_some() {
+            e.container = u.container;
+        }
         e.connected = u.connected.unwrap_or(e.connected);
+        if !e.connected {
+            e.battery = None; // by the time it is back the reading is stale (it may have charged)
+        }
         e.fresh = e.connected && (e.fresh || (!before.connected && ready));
         if !ready {
             return Vec::new();
         }
         let Some(dev) = self.device(i) else { return Vec::new() };
         // a device that shows up through both Bluetooth and Bluetooth LE is one device, not two
-        let twin = self.entries.iter().enumerate().any(|(j, o)| j != i && self.visible_at(j) && o.name == dev.name);
+        let twin = self.entries.iter().enumerate().any(|(j, o)| j != i && self.visible_at(j) && same_device(&self.entries[i], o));
         let e = &self.entries[i];
         match (was, self.visible_at(i)) {
             (false, true) if e.fresh && !twin => {
@@ -248,29 +270,31 @@ impl Registry {
 
     /// The connected devices Notch shows, each once.
     pub fn connected(&self) -> Vec<Device> {
-        let mut out: Vec<Device> = Vec::new();
+        // with the entry each came from, to tell twins from two devices of the same name
+        let mut out: Vec<(usize, Device)> = Vec::new();
         for i in 0..self.entries.len() {
             let Some(d) = self.device(i).filter(|_| self.entries[i].connected) else { continue };
-            match out.iter_mut().find(|o| o.name == d.name) {
-                Some(o) => o.battery = o.battery.or(d.battery), // the twin may know the battery
-                None => out.push(d),
+            match out.iter_mut().find(|(j, _)| same_device(&self.entries[*j], &self.entries[i])) {
+                Some((_, o)) => o.battery = o.battery.or(d.battery), // the twin may know the battery
+                None => out.push((i, d)),
             }
         }
-        out
+        out.into_iter().map(|(_, d)| d).collect()
     }
 
     /// The paired peripherals that are not connected, each once, named. Only the ones `link` can
     /// connect have an address; the rest are listed too, so the tab shows everything that is paired.
     pub fn available(&self) -> Vec<Device> {
-        let mut out: Vec<Device> = Vec::new();
+        let mut out: Vec<(usize, Device)> = Vec::new();
         for i in 0..self.entries.len() {
             let Some(d) = self.device(i).filter(|d| !d.name.is_empty()) else { continue };
-            let connected = self.entries.iter().any(|o| o.connected && o.name == d.name);
-            if !connected && !out.iter().any(|o| o.name == d.name) {
-                out.push(d);
+            let e = &self.entries[i];
+            let connected = self.entries.iter().any(|o| o.connected && same_device(e, o));
+            if !connected && !out.iter().any(|(j, _)| same_device(&self.entries[*j], e)) {
+                out.push((i, d));
             }
         }
-        out
+        out.into_iter().map(|(_, d)| d).collect()
     }
 }
 
@@ -373,8 +397,7 @@ pub fn take_events() -> Vec<Event> {
 
 pub(crate) enum Msg {
     /// A paired device was listed or changed (or, with only a battery, a battery watcher spoke).
-    /// `container`: what Windows groups the device's objects under, where its battery is.
-    Seen { u: Update, container: Option<String> },
+    Seen { u: Update },
     Gone(String),
     /// A watcher has finished listing what was already paired.
     Listed,
@@ -417,18 +440,18 @@ fn kind_of(get: &impl Fn(&str) -> Option<IInspectable>) -> Option<Kind> {
     }
 }
 
-/// An `Update` (and the container id) from a watcher's report; `get` looks a property up by name.
-fn update(id: HSTRING, name: Option<HSTRING>, get: impl Fn(&str) -> Option<IInspectable>) -> (Update, Option<String>) {
+/// An `Update` from a watcher's report; `get` looks a property up by name.
+fn update(id: HSTRING, name: Option<HSTRING>, get: impl Fn(&str) -> Option<IInspectable>) -> Update {
     let u = Update {
         id: id.to_string(),
         name: name.map(|n| n.to_string()),
         connected: get(CONNECTED).and_then(|v| flag(&v)),
         battery: None,
         kind: kind_of(&get),
+        container: get(CONTAINER).and_then(|v| v.cast::<IPropertyValue>().ok()?.GetGuid().ok()).map(|g| format!("{g:?}")),
     };
-    let container = get(CONTAINER).and_then(|v| v.cast::<IPropertyValue>().ok()?.GetGuid().ok()).map(|g| format!("{g:?}"));
-    crate::log(&format!("devices: {} {:?} connected={:?} kind={:?}", u.id, u.name, u.connected, u.kind));
-    (u, container)
+    crate::log(&format!("devices: {} {:?} connected={:?} kind={:?} container={:?}", u.id, u.name, u.connected, u.kind, u.container));
+    u
 }
 
 /// A watcher over the devices of one kind (classic Bluetooth, or LE) that are paired (or, for the
@@ -451,8 +474,8 @@ pub(crate) fn watch(le: bool, paired: bool, tx: &Sender<Msg>) -> Option<DeviceWa
     w.Added(&TypedEventHandler::new(move |_, d: windows_core::Ref<'_, DeviceInformation>| {
         if let Some(d) = d.as_ref() {
             let p = d.Properties().ok();
-            let (u, container) = update(d.Id()?, d.Name().ok(), |k| p.as_ref()?.Lookup(&HSTRING::from(k)).ok());
-            let _ = t.send(Msg::Seen { u, container });
+            let u = update(d.Id()?, d.Name().ok(), |k| p.as_ref()?.Lookup(&HSTRING::from(k)).ok());
+            let _ = t.send(Msg::Seen { u });
         }
         Ok(())
     }))
@@ -461,8 +484,8 @@ pub(crate) fn watch(le: bool, paired: bool, tx: &Sender<Msg>) -> Option<DeviceWa
     w.Updated(&TypedEventHandler::new(move |_, d: windows_core::Ref<'_, DeviceInformationUpdate>| {
         if let Some(d) = d.as_ref() {
             let p = d.Properties().ok();
-            let (u, container) = update(d.Id()?, None, |k| p.as_ref()?.Lookup(&HSTRING::from(k)).ok());
-            let _ = t.send(Msg::Seen { u, container });
+            let u = update(d.Id()?, None, |k| p.as_ref()?.Lookup(&HSTRING::from(k)).ok());
+            let _ = t.send(Msg::Seen { u });
         }
         Ok(())
     }))
@@ -504,7 +527,7 @@ fn watch_battery(id: &str, container: &str, tx: &Sender<Msg>) -> Option<DeviceWa
     let say = |tx: Sender<Msg>, id: String, b: Option<u8>| {
         if let Some(battery) = b {
             crate::log(&format!("devices: {id} battery={battery}"));
-            let _ = tx.send(Msg::Seen { u: Update { id, battery: Some(battery), ..Update::default() }, container: None });
+            let _ = tx.send(Msg::Seen { u: Update { id, battery: Some(battery), ..Update::default() } });
         }
     };
     let (t, who) = (tx.clone(), id.to_string());
@@ -565,8 +588,25 @@ fn run() {
     let mut batteries: HashMap<String, DeviceWatcher> = HashMap::new();
     let mut shown: (Vec<Device>, Vec<Device>, bool) = (Vec::new(), Vec::new(), true);
     let mut radio_on = true;
-    // sleeps here until Windows reports something
-    while let Ok(m) = rx.recv() {
+    // An aborted watcher raises no more events, EnumerationCompleted included, so the listing is not
+    // waited for past this: what was listed by then is what was already connected.
+    let listed_by = Instant::now() + LIST_WAIT;
+    loop {
+        // sleeps here until Windows reports something
+        let m = if waiting == 0 {
+            rx.recv().ok()
+        } else {
+            match rx.recv_timeout(listed_by.saturating_duration_since(Instant::now())) {
+                Ok(m) => Some(m),
+                Err(RecvTimeoutError::Timeout) => {
+                    crate::log(&format!("devices: {waiting} watcher(s) never finished listing; going on without them"));
+                    waiting = 1; // the Listed below takes it to 0
+                    Some(Msg::Listed)
+                }
+                Err(RecvTimeoutError::Disconnected) => None,
+            }
+        };
+        let Some(m) = m else { break };
         let now = Instant::now();
         let events = match m {
             Msg::Radio(on) => {
@@ -586,9 +626,9 @@ fn run() {
                 sync_batteries(&reg, &containers, &mut batteries, &tx);
                 events
             }
-            Msg::Seen { u, container } => {
-                if let Some(c) = container {
-                    containers.insert(u.id.clone(), c);
+            Msg::Seen { u } => {
+                if let Some(c) = &u.container {
+                    containers.insert(u.id.clone(), c.clone());
                 }
                 let events = reg.apply(u, now);
                 sync_batteries(&reg, &containers, &mut batteries, &tx);
@@ -622,7 +662,12 @@ mod tests {
     }
 
     fn up(id: &str, name: &str, connected: bool, battery: Option<u8>, kind: Option<Kind>) -> Update {
-        Update { id: id.into(), name: Some(name.into()), connected: Some(connected), battery, kind }
+        Update { id: id.into(), name: Some(name.into()), connected: Some(connected), battery, kind, container: None }
+    }
+
+    /// The same report, with the container Windows groups the device under.
+    fn upc(id: &str, name: &str, connected: bool, kind: Option<Kind>, container: &str) -> Update {
+        Update { container: Some(container.into()), ..up(id, name, connected, None, kind) }
     }
 
     /// The class of device from the raw 24-bit value: Windows reports its two fields on their own.
@@ -857,6 +902,50 @@ mod tests {
         // a device with no name yet is not listed
         r.apply(up("BluetoothLE#BluetoothLE70:a6:cc:81:41:82-01:02:03:04:05:06", "", false, None, Some(Kind::Mouse)), t);
         assert_eq!(r.available().len(), 1);
+    }
+
+    #[test]
+    fn a_battery_reading_from_before_a_disconnect_is_not_shown_on_reconnect() {
+        let (mut r, t) = (Registry::default(), Instant::now());
+        r.set_ready();
+        r.apply(up("a", "Buds", true, Some(15), Some(Kind::Audio)), t);
+        r.apply(Update { id: "a".into(), connected: Some(false), ..Update::default() }, at(t, 60));
+        // charged overnight; it connects before its battery watcher has said anything
+        let ev = r.apply(Update { id: "a".into(), connected: Some(true), ..Update::default() }, at(t, 90_000));
+        assert!(matches!(&ev[..], [Event::Connected { dev, .. }] if dev.battery.is_none()), "unknown, not the old 15%: {ev:?}");
+        r.apply(Update { id: "a".into(), battery: Some(100), ..Update::default() }, at(t, 90_001));
+        assert_eq!(r.connected()[0].battery, Some(100));
+    }
+
+    #[test]
+    fn two_devices_with_the_same_name_are_two_devices() {
+        let (mut r, t) = (Registry::default(), Instant::now());
+        r.set_ready();
+        let pad = "Xbox Wireless Controller";
+        let a = r.apply(upc("c1", pad, true, Some(Kind::Controller), "box-1"), t);
+        let b = r.apply(upc("c2", pad, true, Some(Kind::Controller), "box-2"), t);
+        assert_eq!((a.len(), b.len()), (1, 1), "a card for each");
+        assert_eq!(r.connected().len(), 2, "a row for each");
+        // one going away while the other stays is still a disconnect
+        let ev = r.apply(Update { id: "c1".into(), connected: Some(false), ..Update::default() }, at(t, 5));
+        assert!(matches!(&ev[..], [Event::Disconnected(_)]));
+        assert_eq!(r.connected().len(), 1);
+    }
+
+    #[test]
+    fn the_two_entries_of_one_device_share_its_container() {
+        // as Windows lists this machine's OnePlus Buds 4: classic and LE, one container
+        let (mut r, t) = (Registry::default(), Instant::now());
+        r.apply(upc(LE, "OnePlus Buds 4", false, Some(Kind::Audio), "1ec8"), t);
+        r.apply(upc(CLASSIC, "OnePlus Buds 4", false, None, "1ec8"), t);
+        r.set_ready();
+        let ev = r.apply(Update { id: CLASSIC.into(), connected: Some(true), ..Update::default() }, at(t, 30));
+        assert!(matches!(&ev[..], [Event::Connected { dev, .. }] if dev.kind == Kind::Audio), "the classic entry takes the LE one's kind");
+        assert!(r.apply(Update { id: LE.into(), connected: Some(true), ..Update::default() }, at(t, 31)).is_empty(), "no second card");
+        assert_eq!(r.connected().len(), 1, "one row");
+        // a twin renamed by the user is still the same device
+        r.apply(Update { id: LE.into(), name: Some("My Buds".into()), ..Update::default() }, at(t, 32));
+        assert_eq!(r.connected().len(), 1);
     }
 
     #[test]

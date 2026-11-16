@@ -246,8 +246,19 @@ fn pair_with(id: &str) -> bool {
     let info = DeviceInformation::CreateFromIdAsyncWithKindAndAdditionalProperties(&HSTRING::from(id), &none, DeviceInformationKind::AssociationEndpoint)
         .and_then(|op| op.join());
     let Some(custom) = info.ok().and_then(|i| i.Pairing().ok()).and_then(|p| p.Custom().ok()) else { return false };
-    let _ = custom.PairingRequested(&TypedEventHandler::new(|_, args: windows_core::Ref<'_, DevicePairingRequestedEventArgs>| {
+    let live = || with(|s| s.pairing.as_deref() == Some(id));
+    // Cancel may have been pressed while the device was looked up: then no request is sent at all
+    if !live() {
+        crate::log("pair: cancelled before it started");
+        return false;
+    }
+    let who = id.to_string();
+    let _ = custom.PairingRequested(&TypedEventHandler::new(move |_, args: windows_core::Ref<'_, DevicePairingRequestedEventArgs>| {
         let Some(a) = args.as_ref() else { return Ok(()) };
+        // cancelled since PairAsync went out: leave the request unanswered, so nothing is paired
+        if with(|s| s.pairing.as_deref() != Some(who.as_str())) {
+            return Ok(());
+        }
         let kind = a.PairingKind()?;
         if kind == DevicePairingKinds::DisplayPin {
             let pin = a.Pin()?.to_string();
@@ -264,7 +275,20 @@ fn pair_with(id: &str) -> bool {
     }));
     let Ok(op) = custom.PairAsync(DevicePairingKinds::ConfirmOnly | DevicePairingKinds::DisplayPin) else { return false };
     let c = op.clone();
-    with(|s| s.cancel = Some(Box::new(move || drop(c.Cancel()))));
+    // checked again under the same lock as storing the hook: a Cancel between the check above and
+    // here would otherwise find nothing to cancel
+    let stored = with(|s| {
+        let live = s.pairing.as_deref() == Some(id);
+        if live {
+            s.cancel = Some(Box::new(move || drop(c.Cancel())));
+        }
+        live
+    });
+    if !stored {
+        let _ = op.Cancel();
+        crate::log("pair: cancelled as it started");
+        return false;
+    }
     let result: windows_core::Result<DevicePairingResult> = op.join();
     let status = result.and_then(|r| r.Status());
     crate::log(&format!("pair: status {status:?}"));
