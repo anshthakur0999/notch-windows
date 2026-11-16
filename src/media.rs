@@ -13,6 +13,7 @@ use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionMediaProperties as Props,
+    GlobalSystemMediaTransportControlsSessionPlaybackControls as Controls,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
 use windows::Storage::Streams::DataReader;
@@ -42,8 +43,10 @@ pub struct Track {
     /// Seconds into the track when it was read, and the track's length (0: unknown, or live).
     pub pos: f64,
     pub len: f64,
-    /// Whether the player takes a seek.
+    /// Whether the player takes a seek, and has a track before / after this one (a single browser video has neither).
     pub seekable: bool,
+    pub can_prev: bool,
+    pub can_next: bool,
     pub at: Instant,
 }
 
@@ -386,11 +389,15 @@ fn read(s: &Session) -> Option<(Track, Props)> {
             }
         }
     }
-    let seekable = len > 0.0 && info.Controls().and_then(|c| c.IsPlaybackPositionEnabled()).unwrap_or(false);
+    let controls = info.Controls().ok();
+    let enabled = |f: fn(&Controls) -> windows::core::Result<bool>| controls.as_ref().is_some_and(|c| f(c).unwrap_or(false));
+    let seekable = len > 0.0 && enabled(|c| c.IsPlaybackPositionEnabled());
+    // a player that says it has no next track still answers "done" to a skip, and does nothing
+    let (can_prev, can_next) = (enabled(|c| c.IsPreviousEnabled()), enabled(|c| c.IsNextEnabled()));
     if len > 0.0 {
         pos = pos.min(len);
     }
-    Some((Track { title, artist, source, playing, pos, len, seekable, at: Instant::now() }, props))
+    Some((Track { title, artist, source, playing, pos, len, seekable, can_prev, can_next, at: Instant::now() }, props))
 }
 
 /// The cover, decoded and shrunk to `ART_MAX` and `ART_SMALL`. Any failure is just "no cover".
@@ -438,7 +445,7 @@ mod tests {
     use super::*;
 
     fn track(title: &str, artist: &str, playing: bool, pos: f64, len: f64) -> Track {
-        Track { title: title.into(), artist: artist.into(), source: "x".into(), playing, pos, len, seekable: true, at: Instant::now() }
+        Track { title: title.into(), artist: artist.into(), source: "x".into(), playing, pos, len, seekable: true, can_prev: true, can_next: true, at: Instant::now() }
     }
 
     #[test]

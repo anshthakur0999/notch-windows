@@ -377,9 +377,11 @@ pub struct HitCtx<'a> {
     pub capsule: Capsule,
     /// Files on the shelf.
     pub shelf_n: usize,
-    /// Something is playing (or paused) in a media app; and whether its player takes a seek.
+    /// Something is playing (or paused) in a media app; and whether its player takes a seek and a skip each way.
     pub media: bool,
     pub seekable: bool,
+    pub can_prev: bool,
+    pub can_next: bool,
     /// What the Devices tab lists, and whether the device card on show has buttons.
     pub dev: devices_tab::Shape<'a>,
     pub card_buttons: bool,
@@ -442,7 +444,7 @@ pub fn hit_test(x: f32, y: f32, c: &HitCtx) -> Hit {
             }
         }
         Tab::Media => {
-            if let Some(hit) = media_view::hit(x, y, c.media, c.seekable) {
+            if let Some(hit) = media_view::hit(x, y, c.media, c.seekable, c.can_prev, c.can_next) {
                 return hit;
             }
         }
@@ -521,6 +523,8 @@ pub struct MediaView<'a> {
     pub levels: [f32; crate::viz::BANDS],
     /// The visualizer is switched on.
     pub bars_on: bool,
+    /// While the seek bar is being dragged: how far along the pointer is (0..1), shown instead of the position.
+    pub scrub: Option<f32>,
 }
 
 /// What the shelf's drawing needs this frame.

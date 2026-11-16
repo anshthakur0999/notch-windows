@@ -687,6 +687,8 @@ mod tests {
             shelf_n: 0,
             media: false,
             seekable: false,
+            can_prev: false,
+            can_next: false,
             dev: Default::default(),
             card_buttons: false,
         };
