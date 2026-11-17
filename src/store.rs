@@ -210,13 +210,18 @@ pub fn now_secs() -> u64 {
 }
 
 impl Store {
-    /// Opens (or creates) the store rooted at `dir`. A corrupt index starts a fresh one.
+    /// Opens (or creates) the store rooted at `dir`. An index that cannot be read (a newer or
+    /// older format, a half-written file) is kept as `clips.json.bad` and a fresh one starts.
     pub fn open(dir: &Path) -> Store {
         let _ = std::fs::create_dir_all(dir.join("clips"));
-        let idx = std::fs::read_to_string(dir.join("clips.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Index>(&t).ok())
-            .unwrap_or_default();
+        let path = dir.join("clips.json");
+        let idx = match std::fs::read_to_string(&path) {
+            Ok(t) => serde_json::from_str::<Index>(&t).unwrap_or_else(|_| {
+                let _ = std::fs::rename(&path, dir.join("clips.json.bad"));
+                Index::default()
+            }),
+            Err(_) => Index::default(),
+        };
         let mut s = Store { dir: dir.to_path_buf(), idx };
         // Drop index entries whose payload vanished.
         let missing: Vec<u64> = s
@@ -528,6 +533,8 @@ mod tests {
         std::fs::write(d.join("clips.json"), "garbage{{").unwrap();
         let s = Store::open(&d);
         assert_eq!(s.len(), 0);
+        // the unreadable index is kept, not overwritten by the next save
+        assert_eq!(std::fs::read_to_string(d.join("clips.json.bad")).unwrap(), "garbage{{");
         let _ = std::fs::remove_dir_all(&d);
     }
 
